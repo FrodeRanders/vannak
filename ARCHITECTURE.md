@@ -527,6 +527,8 @@ The current Rust foundation includes a segment-backed metadata outbox boundary:
   local segment before inserting it into the pending in-memory outbox;
 - `replay_metadata_outbox_segment` rebuilds pending delivery state by reading
   payload records from a segment;
+- `replay_metadata_outbox_segment_after` rebuilds only entries after a committed
+  checkpoint offset;
 - `MetadataOutboxSnapshot` and `SegmentBackedMetadataOutboxSnapshot` expose
   owned observability state without borrowing outbox internals;
 - acknowledged segment-backed entries retain record offsets and can produce
@@ -642,7 +644,9 @@ Recovery flow:
 
 1. Read committed ownership and checkpoint manifests from Raft.
 2. Load latest valid checkpoint for assigned shard.
-3. Replay sealed and open segment data after checkpoint watermark.
+3. Replay sealed and open segment data after checkpoint watermark. For metadata
+   outbox recovery, replay can skip records at or before the committed
+   acknowledged segment offset.
 4. Resume ingest.
 
 ## 11. Metadata Correlation and Ipto Persistence

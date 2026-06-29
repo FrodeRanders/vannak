@@ -725,10 +725,20 @@ impl From<IptoPayloadDecodeError> for MetadataOutboxStorageError {
 pub fn replay_metadata_outbox_segment(
     path: impl AsRef<Path>,
 ) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
+    replay_metadata_outbox_segment_after(path, None)
+}
+
+pub fn replay_metadata_outbox_segment_after(
+    path: impl AsRef<Path>,
+    checkpoint_offset: Option<RecordOffset>,
+) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
     let mut reader = SegmentReader::open(path)?;
     let mut outbox = MetadataOutbox::new();
 
     while let Some(record) = reader.read_next()? {
+        if checkpoint_offset.is_some_and(|offset| record.offset <= offset) {
+            continue;
+        }
         let payload = IptoWritePayload::decode(&record.payload)?;
         let _ = outbox.enqueue_with_offset(payload, Some(record.offset));
     }
@@ -1010,6 +1020,43 @@ mod tests {
         let pending = replayed.next_pending().unwrap();
         assert_eq!(pending.payload(), &payload);
         assert_eq!(pending.record_offset(), Some(offset));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn replay_after_checkpoint_skips_acknowledged_offsets() {
+        let path = temp_segment_path("checkpoint-replay");
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.idempotency_key = IdempotencyKey::from("data-2:metadata-event-2");
+        let mut outbox = SegmentBackedMetadataOutbox::create(
+            &path,
+            SegmentId::from("outbox-segment-b"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let DurableOutboxEnqueueResult::Enqueued {
+            offset: first_offset,
+        } = outbox.enqueue_durable(first.clone()).unwrap()
+        else {
+            unreachable!("first payload should be new")
+        };
+        let DurableOutboxEnqueueResult::Enqueued {
+            offset: second_offset,
+        } = outbox.enqueue_durable(second.clone()).unwrap()
+        else {
+            unreachable!("second payload should be new")
+        };
+        outbox.seal().unwrap();
+
+        let replayed = replay_metadata_outbox_segment_after(&path, Some(first_offset)).unwrap();
+        let pending = replayed.next_pending().unwrap();
+
+        assert_eq!(pending.payload(), &second);
+        assert_eq!(pending.record_offset(), Some(second_offset));
+        assert_eq!(replayed.snapshot().total, 1);
 
         fs::remove_file(path).unwrap();
     }

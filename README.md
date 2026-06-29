@@ -75,7 +75,8 @@ Implemented so far:
 - owned metadata outbox snapshots for pending, failed, acknowledged, and segment
   state;
 - segment-offset tracking for acknowledged durable outbox entries, allowing
-  checkpoint data to be proposed through the cluster control plane.
+  checkpoint data to be proposed through the cluster control plane;
+- checkpoint-aware outbox segment replay that skips acknowledged offsets.
 
 ## Two Event Planes
 

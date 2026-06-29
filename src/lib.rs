@@ -54,6 +54,7 @@ pub use ipto::{
     MetadataOutboxEntry, MetadataOutboxSnapshot, MetadataOutboxStorageError, OutboxEnqueueResult,
     OutboxStatus, SegmentBackedMetadataOutbox, SegmentBackedMetadataOutboxSnapshot,
     deliver_next_pending, drain_pending_outbox, replay_metadata_outbox_segment,
+    replay_metadata_outbox_segment_after,
 };
 pub use metadata::{
     ClassificationId, DataContractId, DatasetId, FieldId, LineageEdgeId, MetadataObjectId,
