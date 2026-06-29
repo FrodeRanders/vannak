@@ -69,7 +69,9 @@ Implemented so far:
   behavior;
 - append-only segment storage with checksummed records;
 - deterministic IpTo write-payload codec;
-- segment-backed metadata outbox enqueue and replay.
+- segment-backed metadata outbox enqueue and replay;
+- minimal `IpToWriter` boundary for draining pending outbox payloads into a
+  concrete metadata writer.
 
 ## Two Event Planes
 
@@ -209,7 +211,8 @@ Current test coverage exercises:
 - IpTo placement by `DataIndividualShardId`;
 - metadata mapping into IpTo write payloads;
 - metadata outbox duplicate detection and acknowledgment;
-- segment-backed metadata outbox replay.
+- segment-backed metadata outbox replay;
+- IpTo writer success/failure handling.
 
 ## Design Direction
 

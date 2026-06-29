@@ -331,8 +331,8 @@ impl MetadataOutbox {
     pub fn next_pending(&self) -> Option<&MetadataOutboxEntry> {
         self.pending
             .iter()
-            .find_map(|key| self.entries.get(key))
-            .filter(|entry| entry.status == OutboxStatus::Pending)
+            .filter_map(|key| self.entries.get(key))
+            .find(|entry| entry.status == OutboxStatus::Pending)
     }
 
     pub fn acknowledge(&mut self, key: &IdempotencyKey) -> bool {
@@ -351,6 +351,7 @@ impl MetadataOutbox {
         entry.status = OutboxStatus::Failed;
         entry.retry_count += 1;
         entry.last_error = Some(error.into());
+        self.pending.retain(|pending_key| pending_key != key);
         true
     }
 
@@ -362,7 +363,9 @@ impl MetadataOutbox {
             return false;
         }
         entry.status = OutboxStatus::Pending;
-        self.pending.push_back(key.clone());
+        if !self.pending.iter().any(|pending_key| pending_key == key) {
+            self.pending.push_back(key.clone());
+        }
         true
     }
 
@@ -379,6 +382,94 @@ impl MetadataOutbox {
 pub enum OutboxEnqueueResult {
     Enqueued,
     Duplicate,
+}
+
+pub trait IpToWriter {
+    fn write(&mut self, payload: &IpToWritePayload) -> Result<(), IpToWriteError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpToWriteError {
+    message: String,
+    retryable: bool,
+}
+
+impl IpToWriteError {
+    pub fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+}
+
+impl fmt::Display for IpToWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.retryable {
+            write!(f, "retryable IpTo write error: {}", self.message)
+        } else {
+            write!(f, "permanent IpTo write error: {}", self.message)
+        }
+    }
+}
+
+impl std::error::Error for IpToWriteError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataOutboxDeliveryResult {
+    NoPending,
+    Acknowledged {
+        idempotency_key: IdempotencyKey,
+    },
+    Failed {
+        idempotency_key: IdempotencyKey,
+        retryable: bool,
+        message: String,
+    },
+}
+
+pub fn deliver_next_pending(
+    outbox: &mut MetadataOutbox,
+    writer: &mut impl IpToWriter,
+) -> MetadataOutboxDeliveryResult {
+    let Some(payload) = outbox.next_pending().map(|entry| entry.payload().clone()) else {
+        return MetadataOutboxDeliveryResult::NoPending;
+    };
+    let key = payload.idempotency_key.clone();
+
+    match writer.write(&payload) {
+        Ok(()) => {
+            outbox.acknowledge(&key);
+            MetadataOutboxDeliveryResult::Acknowledged {
+                idempotency_key: key,
+            }
+        }
+        Err(error) => {
+            let retryable = error.is_retryable();
+            let message = error.message().to_string();
+            outbox.fail(&key, message.clone());
+            MetadataOutboxDeliveryResult::Failed {
+                idempotency_key: key,
+                retryable,
+                message,
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -742,6 +833,82 @@ mod tests {
         assert_eq!(pending.payload(), &payload);
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn outbox_delivery_acknowledges_successful_ipto_write() {
+        let payload = sample_payload();
+        let mut outbox = MetadataOutbox::new();
+        assert_eq!(
+            outbox.enqueue(payload.clone()),
+            OutboxEnqueueResult::Enqueued
+        );
+        let mut writer = RecordingWriter::default();
+
+        let result = deliver_next_pending(&mut outbox, &mut writer);
+
+        assert_eq!(
+            result,
+            MetadataOutboxDeliveryResult::Acknowledged {
+                idempotency_key: payload.idempotency_key.clone()
+            }
+        );
+        assert_eq!(writer.written, vec![payload]);
+        assert!(outbox.next_pending().is_none());
+    }
+
+    #[test]
+    fn outbox_delivery_marks_failed_write_and_continues_to_later_pending() {
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.idempotency_key = IdempotencyKey::from("data-2:metadata-event-2");
+        let mut outbox = MetadataOutbox::new();
+        assert_eq!(outbox.enqueue(first.clone()), OutboxEnqueueResult::Enqueued);
+        assert_eq!(
+            outbox.enqueue(second.clone()),
+            OutboxEnqueueResult::Enqueued
+        );
+        let mut failing_writer = RecordingWriter::retryable_failure("ipto unavailable");
+
+        let result = deliver_next_pending(&mut outbox, &mut failing_writer);
+
+        assert_eq!(
+            result,
+            MetadataOutboxDeliveryResult::Failed {
+                idempotency_key: first.idempotency_key.clone(),
+                retryable: true,
+                message: String::from("ipto unavailable"),
+            }
+        );
+        assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+
+        assert!(outbox.retry_failed(&first.idempotency_key));
+        assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+    }
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        written: Vec<IpToWritePayload>,
+        failure: Option<IpToWriteError>,
+    }
+
+    impl RecordingWriter {
+        fn retryable_failure(message: impl Into<String>) -> Self {
+            Self {
+                written: Vec::new(),
+                failure: Some(IpToWriteError::retryable(message)),
+            }
+        }
+    }
+
+    impl IpToWriter for RecordingWriter {
+        fn write(&mut self, payload: &IpToWritePayload) -> Result<(), IpToWriteError> {
+            if let Some(error) = self.failure.clone() {
+                return Err(error);
+            }
+            self.written.push(payload.clone());
+            Ok(())
+        }
     }
 
     fn sample_event() -> DataIndividualMetadataEvent {

@@ -49,9 +49,10 @@ pub use index::{HotIndex, IngestOutcome};
 pub use ingest::{EventId, EventTimestamp, IngestError, PipelineEvent, SourceId, SourceSequence};
 pub use ipto::{
     DurableOutboxEnqueueResult, IpToAttributeName, IpToInstanceId, IpToMapping,
-    IpToPayloadDecodeError, IpToPlacement, IpToPlacementError, IpToWritePayload, MetadataOutbox,
-    MetadataOutboxEntry, MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus,
-    SegmentBackedMetadataOutbox, replay_metadata_outbox_segment,
+    IpToPayloadDecodeError, IpToPlacement, IpToPlacementError, IpToWriteError, IpToWritePayload,
+    IpToWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxEntry,
+    MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus, SegmentBackedMetadataOutbox,
+    deliver_next_pending, replay_metadata_outbox_segment,
 };
 pub use metadata::{
     ClassificationId, DataContractId, DatasetId, FieldId, LineageEdgeId, MetadataObjectId,

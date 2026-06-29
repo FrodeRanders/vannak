@@ -664,6 +664,14 @@ Responsibilities:
 - write mapped metadata idempotently;
 - expose durable write status for outbox replay.
 
+The current code exposes the first writer boundary as `IpToWriter`. It is a
+synchronous trait over an owned `IpToWritePayload`, with retryable/permanent
+write errors and `deliver_next_pending` to move one pending outbox entry to
+acknowledged or failed. A real adapter should implement this trait against the
+Rust IpTo port or direct PostgreSQL repositories. Async execution, batching,
+backoff, and target-specific writer tasks should be layered outside this trait
+so the domain outbox remains independent of the runtime.
+
 Events should record the metadata version used for enrichment when possible.
 This makes later analysis reproducible:
 
@@ -842,8 +850,9 @@ These policies should be typed configuration, not scattered conditionals.
 
 ### Phase 5: IpTo Writer
 
+- Add writer boundary. [done: minimal `IpToWriter` trait and delivery helper]
 - Add writer tasks per IpTo target.
-- Replay pending outbox entries.
+- Replay pending outbox entries. [partly done: single-entry delivery helper]
 - Track acknowledged metadata writes.
 - Surface degraded IpTo placement/write status.
 
