@@ -528,12 +528,14 @@ The current Rust foundation includes a segment-backed metadata outbox boundary:
 - `replay_metadata_outbox_segment` rebuilds pending delivery state by reading
   payload records from a segment;
 - `MetadataOutboxSnapshot` and `SegmentBackedMetadataOutboxSnapshot` expose
-  owned observability state without borrowing outbox internals.
+  owned observability state without borrowing outbox internals;
+- acknowledged segment-backed entries retain record offsets and can produce
+  `MetadataOutboxCheckpoint` data for the Raft control plane.
 
-This is intentionally only the local persistence and replay boundary. Durable
-acknowledgement state, retry backoff, writer leases, and checkpoint publication
-remain separate concerns so they can be attached to Raft-controlled ownership
-without changing code that produces metadata write payloads.
+This is intentionally only the local persistence, replay, and checkpoint-data
+boundary. Retry backoff, writer leases, and checkpoint publication remain
+separate concerns so they can be attached to Raft-controlled ownership without
+changing code that produces metadata write payloads.
 
 ## 9. Raft-Controlled State
 
@@ -858,7 +860,8 @@ These policies should be typed configuration, not scattered conditionals.
 - Add writer boundary. [done: minimal `IptoWriter` trait and delivery helpers]
 - Add writer tasks per Ipto target.
 - Replay pending outbox entries. [partly done: single-entry delivery helper]
-- Track acknowledged metadata writes.
+- Track acknowledged metadata writes. [partly done: segment offsets and
+  checkpoint data for acknowledged durable entries]
 - Surface degraded Ipto placement/write status.
 
 ### Phase 6: Raft Control Plane

@@ -73,7 +73,9 @@ Implemented so far:
 - minimal `IptoWriter` boundary and bounded drain helper for delivering pending
   outbox payloads into a concrete metadata writer;
 - owned metadata outbox snapshots for pending, failed, acknowledged, and segment
-  state.
+  state;
+- segment-offset tracking for acknowledged durable outbox entries, allowing
+  checkpoint data to be proposed through the cluster control plane.
 
 ## Two Event Planes
 

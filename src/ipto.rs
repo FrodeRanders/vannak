@@ -22,6 +22,7 @@
 //! PostgreSQL-backed repositories.
 
 use crate::NodeId;
+use crate::cluster::{CheckpointEpoch, MetadataOutboxCheckpoint};
 use crate::data::{
     DataIndividualMetadataEvent, DataIndividualShardId, IdempotencyKey, MetadataFieldName,
     MetadataValue,
@@ -276,6 +277,7 @@ pub enum OutboxStatus {
 pub struct MetadataOutboxEntry {
     payload: IptoWritePayload,
     status: OutboxStatus,
+    record_offset: Option<RecordOffset>,
     retry_count: u32,
     last_error: Option<String>,
 }
@@ -287,6 +289,10 @@ impl MetadataOutboxEntry {
 
     pub fn status(&self) -> OutboxStatus {
         self.status
+    }
+
+    pub fn record_offset(&self) -> Option<RecordOffset> {
+        self.record_offset
     }
 
     pub fn retry_count(&self) -> u32 {
@@ -310,6 +316,14 @@ impl MetadataOutbox {
     }
 
     pub fn enqueue(&mut self, payload: IptoWritePayload) -> OutboxEnqueueResult {
+        self.enqueue_with_offset(payload, None)
+    }
+
+    fn enqueue_with_offset(
+        &mut self,
+        payload: IptoWritePayload,
+        record_offset: Option<RecordOffset>,
+    ) -> OutboxEnqueueResult {
         let key = payload.idempotency_key.clone();
         if self.entries.contains_key(&key) {
             return OutboxEnqueueResult::Duplicate;
@@ -320,6 +334,7 @@ impl MetadataOutbox {
             MetadataOutboxEntry {
                 payload,
                 status: OutboxStatus::Pending,
+                record_offset,
                 retry_count: 0,
                 last_error: None,
             },
@@ -395,6 +410,32 @@ impl MetadataOutbox {
         }
 
         snapshot
+    }
+
+    fn acknowledged_checkpoint(
+        &self,
+        data_individual_shard_id: DataIndividualShardId,
+        target: &IptoInstanceId,
+        segment_id: SegmentId,
+        epoch: CheckpointEpoch,
+    ) -> Option<MetadataOutboxCheckpoint> {
+        self.entries
+            .values()
+            .filter(|entry| {
+                entry.status == OutboxStatus::Acknowledged && entry.payload.target == *target
+            })
+            .filter_map(|entry| Some((entry.record_offset?, entry.payload.mapping_version.clone())))
+            .max_by_key(|(offset, _)| *offset)
+            .map(
+                |(last_acknowledged_offset, mapping_version)| MetadataOutboxCheckpoint {
+                    data_individual_shard_id,
+                    target: target.clone(),
+                    segment_id,
+                    last_acknowledged_offset,
+                    mapping_version,
+                    epoch,
+                },
+            )
     }
 }
 
@@ -576,7 +617,10 @@ impl SegmentBackedMetadataOutbox {
 
         let offset = self.writer.append_record(&payload.encode())?;
         self.writer.sync()?;
-        debug_assert_eq!(self.outbox.enqueue(payload), OutboxEnqueueResult::Enqueued);
+        debug_assert_eq!(
+            self.outbox.enqueue_with_offset(payload, Some(offset)),
+            OutboxEnqueueResult::Enqueued
+        );
         Ok(DurableOutboxEnqueueResult::Enqueued { offset })
     }
 
@@ -599,6 +643,20 @@ impl SegmentBackedMetadataOutbox {
             outbox: self.outbox.snapshot(),
             segment: self.writer.manifest(),
         }
+    }
+
+    pub fn acknowledged_checkpoint(
+        &self,
+        data_individual_shard_id: DataIndividualShardId,
+        target: &IptoInstanceId,
+        epoch: CheckpointEpoch,
+    ) -> Option<MetadataOutboxCheckpoint> {
+        self.outbox.acknowledged_checkpoint(
+            data_individual_shard_id,
+            target,
+            self.writer.manifest().segment_id,
+            epoch,
+        )
     }
 
     pub fn seal(self) -> Result<SegmentManifest, MetadataOutboxStorageError> {
@@ -672,7 +730,7 @@ pub fn replay_metadata_outbox_segment(
 
     while let Some(record) = reader.read_next()? {
         let payload = IptoWritePayload::decode(&record.payload)?;
-        let _ = outbox.enqueue(payload);
+        let _ = outbox.enqueue_with_offset(payload, Some(record.offset));
     }
 
     Ok(outbox)
@@ -920,19 +978,38 @@ mod tests {
             result,
             DurableOutboxEnqueueResult::Enqueued { .. }
         ));
+        let DurableOutboxEnqueueResult::Enqueued { offset } = result else {
+            unreachable!("duplicate checked above")
+        };
         assert_eq!(
             outbox.enqueue_durable(payload.clone()).unwrap(),
             DurableOutboxEnqueueResult::Duplicate
         );
         assert_eq!(outbox.outbox().len(), 1);
+        assert_eq!(
+            outbox.outbox().next_pending().unwrap().record_offset(),
+            Some(offset)
+        );
         let snapshot = outbox.snapshot();
         assert_eq!(snapshot.outbox.pending, 1);
         assert_eq!(snapshot.segment.record_count, 1);
+        assert!(outbox.outbox_mut().acknowledge(&payload.idempotency_key));
+        let checkpoint = outbox
+            .acknowledged_checkpoint(
+                DataIndividualShardId(42),
+                &payload.target,
+                CheckpointEpoch(1),
+            )
+            .unwrap();
+        assert_eq!(checkpoint.segment_id, SegmentId::from("outbox-segment-a"));
+        assert_eq!(checkpoint.last_acknowledged_offset, offset);
+        assert_eq!(checkpoint.mapping_version, "v1");
         outbox.seal().unwrap();
 
         let replayed = replay_metadata_outbox_segment(&path).unwrap();
         let pending = replayed.next_pending().unwrap();
         assert_eq!(pending.payload(), &payload);
+        assert_eq!(pending.record_offset(), Some(offset));
 
         fs::remove_file(path).unwrap();
     }
