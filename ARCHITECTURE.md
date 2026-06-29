@@ -25,7 +25,7 @@ metadata systems.
 It combines:
 
 - Durga-style pipeline/process execution state;
-- IpTo-style metadata, lineage, and semantic object management;
+- Ipto-style metadata, lineage, and semantic object management;
 - Sitas-style shard-local hot indexing and explicit message passing;
 - Raft-backed replicated control state.
 
@@ -39,7 +39,7 @@ metadata catalogs, and workflow engines answer only partially:
   individual?
 - What changed before the failure?
 - Which process instance produced or modified a dataset?
-- Which IpTo repository instance owns the durable metadata for this data
+- Which Ipto repository instance owns the durable metadata for this data
   individual?
 - Which cluster node owns the hot state, checkpoints, and sealed event
   segments for a pipeline or metadata object?
@@ -61,7 +61,7 @@ Vannak ingests two related event streams:
 
 It stores recent operational state in memory, writes raw event history and
 metadata outbox entries to append-only segments, writes durable metadata to
-IpTo, and uses Raft for cluster coordination.
+Ipto, and uses Raft for cluster coordination.
 
 ```text
 Durga pipeline runtimes
@@ -72,11 +72,11 @@ Vannak ingest API
     |
 Sitas shard-local hot indexes
     |
-metadata correlation and IpTo placement
+metadata correlation and Ipto placement
     |
 durable metadata outbox
     |
-IpTo PostgreSQL instance selected by DataIndividualShardId
+Ipto PostgreSQL instance selected by DataIndividualShardId
     |
 query API / snapshots / alerting
     |
@@ -92,7 +92,7 @@ coordination.
 
 High-volume event ingest should remain shard-local and append-only where
 possible. Metadata capture that must not be lost needs a durable handoff:
-either an idempotent write to the selected IpTo instance or a persisted outbox
+either an idempotent write to the selected Ipto instance or a persisted outbox
 entry that can be replayed.
 
 ## 3. Architectural Principles
@@ -141,7 +141,7 @@ state model, not just a text index.
 
 ### Treat Metadata References as First-Class
 
-IpTo metadata gives runtime events meaning. Events should carry typed references
+Ipto metadata gives runtime events meaning. Events should carry typed references
 to metadata objects where possible:
 
 - dataset;
@@ -170,12 +170,12 @@ metadata that must survive the monitoring window:
   additions/removals/changes, before/after checksums, and plugin identities.
 
 This is provenance data. It should be captured as append-only facts and written
-to IpTo through a durable outbox or equivalent idempotent path. It is related to
+to Ipto through a durable outbox or equivalent idempotent path. It is related to
 monitoring but must not depend on monitoring retention or best-effort delivery.
 
 ### Separate Domain Placement from Runtime Placement
 
-Sitas shard ids identify executor/runtime placement. IpTo placement should be
+Sitas shard ids identify executor/runtime placement. Ipto placement should be
 based on domain ownership, for example `DataIndividualShardId`. These are
 different axes.
 
@@ -184,11 +184,11 @@ Sitas shard id
     where this event is currently processed
 
 DataIndividualShardId
-    which IpTo repository instance owns this individual's durable metadata
+    which Ipto repository instance owns this individual's durable metadata
 ```
 
 The runtime may use Sitas shards for buffering, indexing, and writer tasks, but
-the final IpTo destination must be selected by an explicit placement resolver.
+the final Ipto destination must be selected by an explicit placement resolver.
 
 ### Preserve Shard-Local Ownership
 
@@ -294,7 +294,7 @@ Initial metadata reference categories:
 - owner id;
 - classification id.
 
-The metadata adapter should resolve these through IpTo where available, but the
+The metadata adapter should resolve these through Ipto where available, but the
 event should remain useful if metadata is temporarily unavailable.
 
 ### Data-Individual Metadata Events
@@ -326,10 +326,10 @@ idempotency_key
 Core identities:
 
 - `DataIndividualId`: stable identity for the flowing data item;
-- `DataIndividualShardId`: domain placement key for IpTo routing;
+- `DataIndividualShardId`: domain placement key for Ipto routing;
 - `MetadataEventId`: identity of the provenance event;
-- `IpToInstanceId`: selected metadata repository instance;
-- `IpToPlacement`: mapping from domain shard id to repository endpoint.
+- `IptoInstanceId`: selected metadata repository instance;
+- `IptoPlacement`: mapping from domain shard id to repository endpoint.
 
 Passive metadata examples:
 
@@ -362,7 +362,7 @@ Active metadata examples:
 - before checksum;
 - after checksum.
 
-The exact metadata vocabulary can remain dynamic and IpTo-backed. Vannak should
+The exact metadata vocabulary can remain dynamic and Ipto-backed. Vannak should
 still keep the envelope typed so routing, durability, idempotency, and
 correlation are not inferred from arbitrary payload strings.
 
@@ -376,7 +376,7 @@ Candidate primary routes:
 - `pipeline_id` for pipeline-current-state ownership;
 - `dataset_id` or `metadata_object_id` for impact indexes;
 - `data_individual_id` for recent provenance lookup;
-- `data_individual_shard_id` for IpTo writer placement;
+- `data_individual_shard_id` for Ipto writer placement;
 - time bucket plus key hash for event-history indexes.
 
 A single event may update multiple logical indexes. The implementation should
@@ -396,9 +396,9 @@ For a first implementation, keep process state and recent event index together
 on the same shard. Add separate work-unit mailboxes for metadata impact indexes
 only when there is a measured need.
 
-IpTo writer work should route by `DataIndividualShardId`, not by the Sitas shard
+Ipto writer work should route by `DataIndividualShardId`, not by the Sitas shard
 that happened to ingest the metadata event. Multiple Sitas shards may enqueue
-work for the same IpTo placement target.
+work for the same Ipto placement target.
 
 ## 6. Hot Indexes
 
@@ -448,7 +448,7 @@ Initial query families:
 - find pipelines touching a dataset or classification;
 - find metadata events for a data individual;
 - find data individuals touched by a process instance or activity;
-- find failed or pending IpTo metadata writes by placement shard;
+- find failed or pending Ipto metadata writes by placement shard;
 - get current shard and cluster snapshots;
 - get segment/checkpoint status.
 
@@ -498,11 +498,11 @@ Data-individual metadata capture needs a stronger durability posture than
 best-effort monitoring. The recommended flow is:
 
 1. Validate metadata event.
-2. Resolve `DataIndividualShardId` to an `IpToInstanceId`.
-3. Persist an outbox entry or write idempotently to IpTo.
+2. Resolve `DataIndividualShardId` to an `IptoInstanceId`.
+3. Persist an outbox entry or write idempotently to Ipto.
 4. Acknowledge capture only after step 3 has succeeded according to the
    configured durability mode.
-5. Retry pending outbox entries until IpTo acknowledges them.
+5. Retry pending outbox entries until Ipto acknowledges them.
 6. Record committed write status and checkpoints.
 
 Outbox entries should include:
@@ -510,23 +510,25 @@ Outbox entries should include:
 - metadata event id;
 - data individual id;
 - data individual shard id;
-- selected IpTo instance id;
+- selected Ipto instance id;
 - idempotency key;
-- mapped IpTo unit/attribute payload;
+- mapped Ipto unit/attribute payload;
 - retry count;
 - last error;
 - write status.
 
 Idempotency is required because replay after failure may resend the same
-metadata event to IpTo.
+metadata event to Ipto.
 
 The current Rust foundation includes a segment-backed metadata outbox boundary:
 
-- `IpToWritePayload` has a deterministic dependency-free binary codec;
+- `IptoWritePayload` has a deterministic dependency-free binary codec;
 - `SegmentBackedMetadataOutbox` appends and syncs the encoded payload to a
   local segment before inserting it into the pending in-memory outbox;
 - `replay_metadata_outbox_segment` rebuilds pending delivery state by reading
-  payload records from a segment.
+  payload records from a segment;
+- `MetadataOutboxSnapshot` and `SegmentBackedMetadataOutboxSnapshot` expose
+  owned observability state without borrowing outbox internals.
 
 This is intentionally only the local persistence and replay boundary. Durable
 acknowledgement state, retry backoff, writer leases, and checkpoint publication
@@ -543,8 +545,8 @@ Raft should own compact cluster state:
 - logical partition ownership;
 - leadership or lease records;
 - active metadata version;
-- IpTo placement map from `DataIndividualShardId` ranges or buckets to
-  `IpToInstanceId`;
+- Ipto placement map from `DataIndividualShardId` ranges or buckets to
+  `IptoInstanceId`;
 - sealed segment manifests;
 - metadata outbox checkpoint manifests;
 - checkpoint manifests;
@@ -571,8 +573,8 @@ the same way.
 
 Good Raft payloads:
 
-- `DataIndividualShardId` to `IpToInstanceId` placement maps;
-- writer leases for an IpTo target or data-individual shard range;
+- `DataIndividualShardId` to `IptoInstanceId` placement maps;
+- writer leases for an Ipto target or data-individual shard range;
 - ownership epochs for process, metadata, or writer partitions;
 - active metadata mapping versions;
 - sealed segment manifests;
@@ -587,18 +589,18 @@ Bad Raft payloads:
 - data-individual metadata events;
 - large data payloads;
 - every hot-index mutation;
-- every IpTo write attempt;
+- every Ipto write attempt;
 - query results;
 - high-frequency metrics.
 
 Those high-volume records should flow through Sitas-owned hot state,
-append-only segments, outbox replay, and IpTo writers. Raft should commit the
+append-only segments, outbox replay, and Ipto writers. Raft should commit the
 metadata that makes those paths recoverable and unambiguous.
 
 The first useful Raft-backed feature should be:
 
 ```text
-IpTo placement map
+Ipto placement map
     +
 writer lease
     +
@@ -608,7 +610,7 @@ metadata outbox checkpoint
 That gives the cluster three concrete guarantees:
 
 1. all nodes agree where durable metadata for a data individual belongs;
-2. only the lease holder actively writes a given IpTo target or placement range;
+2. only the lease holder actively writes a given Ipto target or placement range;
 3. failover can resume replay from an agreed checkpoint instead of guessing.
 
 ## 10. Checkpoints and Recovery
@@ -641,14 +643,14 @@ Recovery flow:
 3. Replay sealed and open segment data after checkpoint watermark.
 4. Resume ingest.
 
-## 11. Metadata Correlation and IpTo Persistence
+## 11. Metadata Correlation and Ipto Persistence
 
-The metadata adapter should isolate IpTo integration for two related but
+The metadata adapter should isolate Ipto integration for two related but
 different responsibilities:
 
 - correlation: resolving metadata references and answering impact questions;
 - persistence: writing durable data-individual metadata/provenance facts to the
-  correct IpTo repository instance.
+  correct Ipto repository instance.
 
 Responsibilities:
 
@@ -658,18 +660,18 @@ Responsibilities:
 - expose metadata version identity;
 - handle missing or stale metadata;
 - return owned metadata snapshots or compact derived facts;
-- resolve `DataIndividualShardId` to an `IpToInstanceId`;
-- map data-individual metadata event fields to IpTo units, attributes, records,
+- resolve `DataIndividualShardId` to an `IptoInstanceId`;
+- map data-individual metadata event fields to Ipto units, attributes, records,
   and relations;
 - write mapped metadata idempotently;
 - expose durable write status for outbox replay.
 
-The current code exposes the first writer boundary as `IpToWriter`. It is a
-synchronous trait over an owned `IpToWritePayload`, with retryable/permanent
+The current code exposes the first writer boundary as `IptoWriter`. It is a
+synchronous trait over an owned `IptoWritePayload`, with retryable/permanent
 write errors and `deliver_next_pending` to move one pending outbox entry to
 acknowledged or failed. `drain_pending_outbox` adds a bounded delivery loop that
 can later become the inner unit of a Sitas shard-local writer task. A real
-adapter should implement this trait against the Rust IpTo port or direct
+adapter should implement this trait against the Rust Ipto port or direct
 PostgreSQL repositories. Async execution, batching, backoff, and target-specific
 writer tasks should be layered outside this trait so the domain outbox remains
 independent of the runtime.
@@ -685,14 +687,14 @@ When metadata is missing, the event should still be accepted if it is otherwise
 valid. Missing references can be placed in a shard-local unresolved queue and
 reprocessed when metadata changes.
 
-When an IpTo repository instance is unavailable, data-individual metadata
+When an Ipto repository instance is unavailable, data-individual metadata
 capture should remain durable through the outbox. The system may report degraded
 write status, but it should not silently drop metadata events.
 
-### Mapping Flowing Data to IpTo
+### Mapping Flowing Data to Ipto
 
-IpTo is dynamic with respect to content. Vannak should therefore support a
-mapping layer from names in the flowing data individual to IpTo attributes or
+Ipto is dynamic with respect to content. Vannak should therefore support a
+mapping layer from names in the flowing data individual to Ipto attributes or
 records.
 
 Example mapping intent:
@@ -707,7 +709,7 @@ transform.plugin_name    -> attr:provenance.transform_plugin
 ```
 
 Mappings should be versioned and observable. A metadata event should be able to
-record which mapping version produced the IpTo write payload.
+record which mapping version produced the Ipto write payload.
 
 ## 12. Durga Integration
 
@@ -755,12 +757,13 @@ Useful Sitas mechanisms:
 - CPU placement and future NUMA memory placement for hot indexes;
 - bounded queues and backpressure for ingest control.
 
-For IpTo persistence, useful Sitas shapes are:
+For Ipto persistence, useful Sitas shapes are:
 
 - one or more shard-local metadata outbox queues;
-- work-unit mailboxes keyed by `IpToInstanceId` or `DataIndividualShardId`;
-- bounded writer tasks per IpTo target;
-- owned snapshots for pending, failed, and acknowledged metadata writes.
+- work-unit mailboxes keyed by `IptoInstanceId` or `DataIndividualShardId`;
+- bounded writer tasks per Ipto target;
+- owned snapshots for pending, failed, and acknowledged metadata writes. [done:
+  local outbox and segment-backed outbox snapshots]
 
 NUMA guidance:
 
@@ -784,8 +787,8 @@ Snapshots should include:
 - process instances by state;
 - metadata references unresolved;
 - metadata outbox pending/failed/acknowledged counts;
-- IpTo write latency and retry counts;
-- IpTo placement map version;
+- Ipto write latency and retry counts;
+- Ipto placement map version;
 - segment writer state;
 - sealed segment count;
 - checkpoint age;
@@ -802,9 +805,9 @@ Initial policies should be explicit:
 - duplicate event: ignore or record duplicate counter;
 - out-of-order event: buffer, reject, or apply reducer-specific policy;
 - missing metadata: accept event with unresolved reference;
-- IpTo placement missing: reject or park metadata event according to configured
+- Ipto placement missing: reject or park metadata event according to configured
   policy;
-- IpTo write failure: keep durable outbox entry pending and retry with
+- Ipto write failure: keep durable outbox entry pending and retry with
   idempotency key;
 - segment write failure: mark shard degraded and stop accepting affected
   partition if durability is required;
@@ -828,7 +831,7 @@ These policies should be typed configuration, not scattered conditionals.
 
 ### Phase 2: Metadata-Aware Indexing
 
-- Add IpTo adapter boundary.
+- Add Ipto adapter boundary.
 - Index events by metadata object and dataset.
 - Add impact queries.
 - Track metadata version used for enrichment.
@@ -838,8 +841,8 @@ These policies should be typed configuration, not scattered conditionals.
 
 - Define `DataIndividualId`, `DataIndividualShardId`, and metadata event model.
 - Separate passive and active metadata facts.
-- Add IpTo placement resolver.
-- Add mapping from data names to IpTo attributes/templates.
+- Add Ipto placement resolver.
+- Add mapping from data names to Ipto attributes/templates.
 - Add idempotency keys for metadata writes.
 
 ### Phase 4: Local Durability
@@ -850,19 +853,19 @@ These policies should be typed configuration, not scattered conditionals.
 - Persist segment summaries.
 - Rebuild hot state from segments.
 
-### Phase 5: IpTo Writer
+### Phase 5: Ipto Writer
 
-- Add writer boundary. [done: minimal `IpToWriter` trait and delivery helpers]
-- Add writer tasks per IpTo target.
+- Add writer boundary. [done: minimal `IptoWriter` trait and delivery helpers]
+- Add writer tasks per Ipto target.
 - Replay pending outbox entries. [partly done: single-entry delivery helper]
 - Track acknowledged metadata writes.
-- Surface degraded IpTo placement/write status.
+- Surface degraded Ipto placement/write status.
 
 ### Phase 6: Raft Control Plane
 
 - Add node identity and membership.
 - Add shard/partition ownership.
-- Replicate IpTo placement map.
+- Replicate Ipto placement map.
 - Replicate sealed segment manifests.
 - Replicate metadata outbox checkpoint manifests.
 - Replicate checkpoint manifests.
@@ -881,7 +884,7 @@ These policies should be typed configuration, not scattered conditionals.
 Vannak is not initially:
 
 - a workflow engine replacing Durga;
-- a metadata catalog replacing IpTo;
+- a metadata catalog replacing Ipto;
 - a distributed SQL engine;
 - a generic full-text log search product;
 - a consensus-replicated event firehose;
@@ -897,13 +900,13 @@ metadata.
 
 - Should Durga add a native event id, or should Vannak continue deriving one
   from source identity and stream position?
-- Which IpTo identifiers are stable enough to embed directly in events?
+- Which Ipto identifiers are stable enough to embed directly in events?
 - What is the canonical identity scheme for data individuals?
 - How is `DataIndividualShardId` assigned and kept stable?
-- What is the first IpTo placement-map format?
+- What is the first Ipto placement-map format?
 - Which passive metadata fields should be part of the core envelope?
 - Which active metadata operations should be standardized first?
-- How are flowing-data names mapped to IpTo attributes and records?
+- How are flowing-data names mapped to Ipto attributes and records?
 - What durability mode is required before acknowledging metadata capture?
 - What ordering guarantees can pipeline event producers provide?
 - Should process reducers be strict state machines or tolerant state repairers?

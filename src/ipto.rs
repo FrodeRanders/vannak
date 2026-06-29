@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-//! IpTo placement, mapping, and durable outbox primitives.
+//! Ipto placement, mapping, and durable outbox primitives.
 //!
 //! This module is still dependency-free. A later adapter can translate
-//! `IpToWritePayload` into calls against the Rust IpTo repository API or direct
+//! `IptoWritePayload` into calls against the Rust Ipto repository API or direct
 //! PostgreSQL-backed repositories.
 
 use crate::NodeId;
@@ -35,9 +35,9 @@ use std::fmt;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IpToInstanceId(String);
+pub struct IptoInstanceId(String);
 
-impl IpToInstanceId {
+impl IptoInstanceId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -47,33 +47,33 @@ impl IpToInstanceId {
     }
 }
 
-impl From<&str> for IpToInstanceId {
+impl From<&str> for IptoInstanceId {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
 }
 
-impl From<String> for IpToInstanceId {
+impl From<String> for IptoInstanceId {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-impl fmt::Display for IpToInstanceId {
+impl fmt::Display for IptoInstanceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToPlacement {
-    buckets: Vec<IpToInstanceId>,
+pub struct IptoPlacement {
+    buckets: Vec<IptoInstanceId>,
 }
 
-impl IpToPlacement {
-    pub fn new(buckets: Vec<IpToInstanceId>) -> Result<Self, IpToPlacementError> {
+impl IptoPlacement {
+    pub fn new(buckets: Vec<IptoInstanceId>) -> Result<Self, IptoPlacementError> {
         if buckets.is_empty() {
-            return Err(IpToPlacementError::NoInstances);
+            return Err(IptoPlacementError::NoInstances);
         }
         Ok(Self { buckets })
     }
@@ -81,38 +81,38 @@ impl IpToPlacement {
     pub fn resolve(
         &self,
         shard_id: DataIndividualShardId,
-    ) -> Result<IpToInstanceId, IpToPlacementError> {
+    ) -> Result<IptoInstanceId, IptoPlacementError> {
         let idx = shard_id.0 as usize % self.buckets.len();
         self.buckets
             .get(idx)
             .cloned()
-            .ok_or(IpToPlacementError::NoInstances)
+            .ok_or(IptoPlacementError::NoInstances)
     }
 
-    pub fn instances(&self) -> &[IpToInstanceId] {
+    pub fn instances(&self) -> &[IptoInstanceId] {
         &self.buckets
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IpToPlacementError {
+pub enum IptoPlacementError {
     NoInstances,
 }
 
-impl fmt::Display for IpToPlacementError {
+impl fmt::Display for IptoPlacementError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoInstances => f.write_str("IpTo placement requires at least one instance"),
+            Self::NoInstances => f.write_str("Ipto placement requires at least one instance"),
         }
     }
 }
 
-impl std::error::Error for IpToPlacementError {}
+impl std::error::Error for IptoPlacementError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct IpToAttributeName(String);
+pub struct IptoAttributeName(String);
 
-impl IpToAttributeName {
+impl IptoAttributeName {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
@@ -122,26 +122,26 @@ impl IpToAttributeName {
     }
 }
 
-impl From<&str> for IpToAttributeName {
+impl From<&str> for IptoAttributeName {
     fn from(value: &str) -> Self {
         Self::new(value)
     }
 }
 
-impl From<String> for IpToAttributeName {
+impl From<String> for IptoAttributeName {
     fn from(value: String) -> Self {
         Self::new(value)
     }
 }
 
-/// Versioned mapping from Vannak metadata field names to IpTo attributes.
+/// Versioned mapping from Vannak metadata field names to Ipto attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToMapping {
+pub struct IptoMapping {
     version: String,
-    fields: BTreeMap<MetadataFieldName, IpToAttributeName>,
+    fields: BTreeMap<MetadataFieldName, IptoAttributeName>,
 }
 
-impl IpToMapping {
+impl IptoMapping {
     pub fn new(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),
@@ -152,7 +152,7 @@ impl IpToMapping {
     pub fn map_field(
         mut self,
         field: impl Into<MetadataFieldName>,
-        attribute: impl Into<IpToAttributeName>,
+        attribute: impl Into<IptoAttributeName>,
     ) -> Self {
         self.fields.insert(field.into(), attribute.into());
         self
@@ -162,25 +162,25 @@ impl IpToMapping {
         &self.version
     }
 
-    pub fn attribute_for(&self, field: &MetadataFieldName) -> Option<&IpToAttributeName> {
+    pub fn attribute_for(&self, field: &MetadataFieldName) -> Option<&IptoAttributeName> {
         self.fields.get(field)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToWritePayload {
-    pub target: IpToInstanceId,
+pub struct IptoWritePayload {
+    pub target: IptoInstanceId,
     pub idempotency_key: IdempotencyKey,
     pub mapping_version: String,
-    pub attributes: BTreeMap<IpToAttributeName, MetadataValue>,
+    pub attributes: BTreeMap<IptoAttributeName, MetadataValue>,
 }
 
-impl IpToWritePayload {
+impl IptoWritePayload {
     pub fn from_event(
         event: &DataIndividualMetadataEvent,
-        placement: &IpToPlacement,
-        mapping: &IpToMapping,
-    ) -> Result<Self, IpToPlacementError> {
+        placement: &IptoPlacement,
+        mapping: &IptoMapping,
+    ) -> Result<Self, IptoPlacementError> {
         let mut attributes = BTreeMap::new();
         for (field, value) in event.passive_metadata().fields() {
             if let Some(attribute) = mapping.attribute_for(field) {
@@ -205,7 +205,7 @@ impl IpToWritePayload {
     ///
     /// This is a small stable binary format, not a general serialization
     /// framework. It exists so outbox replay can be implemented before choosing
-    /// JSON, serde, or a direct IpTo wire format.
+    /// JSON, serde, or a direct Ipto wire format.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         write_string(&mut out, self.target.as_str());
@@ -219,15 +219,15 @@ impl IpToWritePayload {
         out
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, IpToPayloadDecodeError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, IptoPayloadDecodeError> {
         let mut cursor = DecodeCursor::new(bytes);
-        let target = IpToInstanceId::from(cursor.read_string()?);
+        let target = IptoInstanceId::from(cursor.read_string()?);
         let idempotency_key = IdempotencyKey::from(cursor.read_string()?);
         let mapping_version = cursor.read_string()?;
         let attribute_count = cursor.read_u32()? as usize;
         let mut attributes = BTreeMap::new();
         for _ in 0..attribute_count {
-            let attribute = IpToAttributeName::from(cursor.read_string()?);
+            let attribute = IptoAttributeName::from(cursor.read_string()?);
             let value = cursor.read_metadata_value()?;
             attributes.insert(attribute, value);
         }
@@ -243,27 +243,27 @@ impl IpToWritePayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IpToPayloadDecodeError {
+pub enum IptoPayloadDecodeError {
     UnexpectedEof,
     InvalidUtf8,
     InvalidValueTag(u8),
     TrailingBytes(usize),
 }
 
-impl fmt::Display for IpToPayloadDecodeError {
+impl fmt::Display for IptoPayloadDecodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnexpectedEof => f.write_str("unexpected end of IpTo payload bytes"),
-            Self::InvalidUtf8 => f.write_str("IpTo payload contains invalid UTF-8"),
-            Self::InvalidValueTag(tag) => write!(f, "invalid IpTo metadata value tag {tag}"),
+            Self::UnexpectedEof => f.write_str("unexpected end of Ipto payload bytes"),
+            Self::InvalidUtf8 => f.write_str("Ipto payload contains invalid UTF-8"),
+            Self::InvalidValueTag(tag) => write!(f, "invalid Ipto metadata value tag {tag}"),
             Self::TrailingBytes(count) => {
-                write!(f, "IpTo payload has {count} trailing undecoded bytes")
+                write!(f, "Ipto payload has {count} trailing undecoded bytes")
             }
         }
     }
 }
 
-impl std::error::Error for IpToPayloadDecodeError {}
+impl std::error::Error for IptoPayloadDecodeError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboxStatus {
@@ -274,14 +274,14 @@ pub enum OutboxStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataOutboxEntry {
-    payload: IpToWritePayload,
+    payload: IptoWritePayload,
     status: OutboxStatus,
     retry_count: u32,
     last_error: Option<String>,
 }
 
 impl MetadataOutboxEntry {
-    pub fn payload(&self) -> &IpToWritePayload {
+    pub fn payload(&self) -> &IptoWritePayload {
         &self.payload
     }
 
@@ -309,7 +309,7 @@ impl MetadataOutbox {
         Self::default()
     }
 
-    pub fn enqueue(&mut self, payload: IpToWritePayload) -> OutboxEnqueueResult {
+    pub fn enqueue(&mut self, payload: IptoWritePayload) -> OutboxEnqueueResult {
         let key = payload.idempotency_key.clone();
         if self.entries.contains_key(&key) {
             return OutboxEnqueueResult::Duplicate;
@@ -376,6 +376,26 @@ impl MetadataOutbox {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn snapshot(&self) -> MetadataOutboxSnapshot {
+        let mut snapshot = MetadataOutboxSnapshot {
+            total: self.entries.len(),
+            pending: 0,
+            acknowledged: 0,
+            failed: 0,
+            queued_pending: self.pending.len(),
+        };
+
+        for entry in self.entries.values() {
+            match entry.status {
+                OutboxStatus::Pending => snapshot.pending += 1,
+                OutboxStatus::Acknowledged => snapshot.acknowledged += 1,
+                OutboxStatus::Failed => snapshot.failed += 1,
+            }
+        }
+
+        snapshot
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,17 +404,26 @@ pub enum OutboxEnqueueResult {
     Duplicate,
 }
 
-pub trait IpToWriter {
-    fn write(&mut self, payload: &IpToWritePayload) -> Result<(), IpToWriteError>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataOutboxSnapshot {
+    pub total: usize,
+    pub pending: usize,
+    pub acknowledged: usize,
+    pub failed: usize,
+    pub queued_pending: usize,
+}
+
+pub trait IptoWriter {
+    fn write(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToWriteError {
+pub struct IptoWriteError {
     message: String,
     retryable: bool,
 }
 
-impl IpToWriteError {
+impl IptoWriteError {
     pub fn retryable(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -418,17 +447,17 @@ impl IpToWriteError {
     }
 }
 
-impl fmt::Display for IpToWriteError {
+impl fmt::Display for IptoWriteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.retryable {
-            write!(f, "retryable IpTo write error: {}", self.message)
+            write!(f, "retryable Ipto write error: {}", self.message)
         } else {
-            write!(f, "permanent IpTo write error: {}", self.message)
+            write!(f, "permanent Ipto write error: {}", self.message)
         }
     }
 }
 
-impl std::error::Error for IpToWriteError {}
+impl std::error::Error for IptoWriteError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MetadataOutboxDeliveryResult {
@@ -445,7 +474,7 @@ pub enum MetadataOutboxDeliveryResult {
 
 pub fn deliver_next_pending(
     outbox: &mut MetadataOutbox,
-    writer: &mut impl IpToWriter,
+    writer: &mut impl IptoWriter,
 ) -> MetadataOutboxDeliveryResult {
     let Some(payload) = outbox.next_pending().map(|entry| entry.payload().clone()) else {
         return MetadataOutboxDeliveryResult::NoPending;
@@ -488,7 +517,7 @@ impl MetadataOutboxDrainSummary {
 
 pub fn drain_pending_outbox(
     outbox: &mut MetadataOutbox,
-    writer: &mut impl IpToWriter,
+    writer: &mut impl IptoWriter,
     max_attempts: usize,
 ) -> MetadataOutboxDrainSummary {
     let mut summary = MetadataOutboxDrainSummary {
@@ -539,7 +568,7 @@ impl SegmentBackedMetadataOutbox {
 
     pub fn enqueue_durable(
         &mut self,
-        payload: IpToWritePayload,
+        payload: IptoWritePayload,
     ) -> Result<DurableOutboxEnqueueResult, MetadataOutboxStorageError> {
         if self.outbox.entries.contains_key(&payload.idempotency_key) {
             return Ok(DurableOutboxEnqueueResult::Duplicate);
@@ -565,6 +594,13 @@ impl SegmentBackedMetadataOutbox {
         self.writer.manifest()
     }
 
+    pub fn snapshot(&self) -> SegmentBackedMetadataOutboxSnapshot {
+        SegmentBackedMetadataOutboxSnapshot {
+            outbox: self.outbox.snapshot(),
+            segment: self.writer.manifest(),
+        }
+    }
+
     pub fn seal(self) -> Result<SegmentManifest, MetadataOutboxStorageError> {
         Ok(self.writer.seal()?)
     }
@@ -584,10 +620,16 @@ pub enum DurableOutboxEnqueueResult {
     Duplicate,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentBackedMetadataOutboxSnapshot {
+    pub outbox: MetadataOutboxSnapshot,
+    pub segment: SegmentManifest,
+}
+
 #[derive(Debug)]
 pub enum MetadataOutboxStorageError {
     Segment(SegmentError),
-    PayloadDecode(IpToPayloadDecodeError),
+    PayloadDecode(IptoPayloadDecodeError),
 }
 
 impl fmt::Display for MetadataOutboxStorageError {
@@ -616,8 +658,8 @@ impl From<SegmentError> for MetadataOutboxStorageError {
     }
 }
 
-impl From<IpToPayloadDecodeError> for MetadataOutboxStorageError {
-    fn from(value: IpToPayloadDecodeError) -> Self {
+impl From<IptoPayloadDecodeError> for MetadataOutboxStorageError {
+    fn from(value: IptoPayloadDecodeError) -> Self {
         Self::PayloadDecode(value)
     }
 }
@@ -629,7 +671,7 @@ pub fn replay_metadata_outbox_segment(
     let mut outbox = MetadataOutbox::new();
 
     while let Some(record) = reader.read_next()? {
-        let payload = IpToWritePayload::decode(&record.payload)?;
+        let payload = IptoWritePayload::decode(&record.payload)?;
         let _ = outbox.enqueue(payload);
     }
 
@@ -687,55 +729,55 @@ impl<'a> DecodeCursor<'a> {
         Self { bytes, pos: 0 }
     }
 
-    fn finish(&self) -> Result<(), IpToPayloadDecodeError> {
+    fn finish(&self) -> Result<(), IptoPayloadDecodeError> {
         if self.pos == self.bytes.len() {
             Ok(())
         } else {
-            Err(IpToPayloadDecodeError::TrailingBytes(
+            Err(IptoPayloadDecodeError::TrailingBytes(
                 self.bytes.len() - self.pos,
             ))
         }
     }
 
-    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], IpToPayloadDecodeError> {
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], IptoPayloadDecodeError> {
         let end = self
             .pos
             .checked_add(len)
-            .ok_or(IpToPayloadDecodeError::UnexpectedEof)?;
+            .ok_or(IptoPayloadDecodeError::UnexpectedEof)?;
         let Some(slice) = self.bytes.get(self.pos..end) else {
-            return Err(IpToPayloadDecodeError::UnexpectedEof);
+            return Err(IptoPayloadDecodeError::UnexpectedEof);
         };
         self.pos = end;
         Ok(slice)
     }
 
-    fn read_u8(&mut self) -> Result<u8, IpToPayloadDecodeError> {
+    fn read_u8(&mut self) -> Result<u8, IptoPayloadDecodeError> {
         Ok(self.read_exact(1)?[0])
     }
 
-    fn read_u32(&mut self) -> Result<u32, IpToPayloadDecodeError> {
+    fn read_u32(&mut self) -> Result<u32, IptoPayloadDecodeError> {
         let bytes: [u8; 4] = self
             .read_exact(4)?
             .try_into()
-            .map_err(|_| IpToPayloadDecodeError::UnexpectedEof)?;
+            .map_err(|_| IptoPayloadDecodeError::UnexpectedEof)?;
         Ok(u32::from_le_bytes(bytes))
     }
 
-    fn read_i64(&mut self) -> Result<i64, IpToPayloadDecodeError> {
+    fn read_i64(&mut self) -> Result<i64, IptoPayloadDecodeError> {
         let bytes: [u8; 8] = self
             .read_exact(8)?
             .try_into()
-            .map_err(|_| IpToPayloadDecodeError::UnexpectedEof)?;
+            .map_err(|_| IptoPayloadDecodeError::UnexpectedEof)?;
         Ok(i64::from_le_bytes(bytes))
     }
 
-    fn read_string(&mut self) -> Result<String, IpToPayloadDecodeError> {
+    fn read_string(&mut self) -> Result<String, IptoPayloadDecodeError> {
         let len = self.read_u32()? as usize;
         let bytes = self.read_exact(len)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| IpToPayloadDecodeError::InvalidUtf8)
+        String::from_utf8(bytes.to_vec()).map_err(|_| IptoPayloadDecodeError::InvalidUtf8)
     }
 
-    fn read_metadata_value(&mut self) -> Result<MetadataValue, IpToPayloadDecodeError> {
+    fn read_metadata_value(&mut self) -> Result<MetadataValue, IptoPayloadDecodeError> {
         let tag = self.read_u8()?;
         match tag {
             0 => Ok(MetadataValue::String(self.read_string()?)),
@@ -752,7 +794,7 @@ impl<'a> DecodeCursor<'a> {
                 }
                 Ok(MetadataValue::StringList(values))
             }
-            other => Err(IpToPayloadDecodeError::InvalidValueTag(other)),
+            other => Err(IptoPayloadDecodeError::InvalidValueTag(other)),
         }
     }
 }
@@ -774,19 +816,19 @@ mod tests {
 
     #[test]
     fn placement_maps_data_individual_shards_to_ipto_instances() {
-        let placement = IpToPlacement::new(vec![
-            IpToInstanceId::from("ipto-a"),
-            IpToInstanceId::from("ipto-b"),
+        let placement = IptoPlacement::new(vec![
+            IptoInstanceId::from("ipto-a"),
+            IptoInstanceId::from("ipto-b"),
         ])
         .unwrap();
 
         assert_eq!(
             placement.resolve(DataIndividualShardId(0)).unwrap(),
-            IpToInstanceId::from("ipto-a")
+            IptoInstanceId::from("ipto-a")
         );
         assert_eq!(
             placement.resolve(DataIndividualShardId(3)).unwrap(),
-            IpToInstanceId::from("ipto-b")
+            IptoInstanceId::from("ipto-b")
         );
     }
 
@@ -801,14 +843,14 @@ mod tests {
             .with_active_metadata(
                 ActiveMetadata::new().insert("mask.customer.email", MetadataValue::Boolean(true)),
             );
-        let placement = IpToPlacement::new(vec![IpToInstanceId::from("ipto-a")]).unwrap();
-        let mapping = IpToMapping::new("v1")
+        let placement = IptoPlacement::new(vec![IptoInstanceId::from("ipto-a")]).unwrap();
+        let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
             .map_field("mask.customer.email", "attr:provenance.masked_field");
 
-        let payload = IpToWritePayload::from_event(&event, &placement, &mapping).unwrap();
-        assert_eq!(payload.target, IpToInstanceId::from("ipto-a"));
+        let payload = IptoWritePayload::from_event(&event, &placement, &mapping).unwrap();
+        assert_eq!(payload.target, IptoInstanceId::from("ipto-a"));
         assert_eq!(payload.attributes.len(), 3);
 
         let mut outbox = MetadataOutbox::new();
@@ -823,13 +865,23 @@ mod tests {
         assert!(outbox.next_pending().is_some());
         assert!(outbox.acknowledge(&payload.idempotency_key));
         assert!(outbox.next_pending().is_none());
+        assert_eq!(
+            outbox.snapshot(),
+            MetadataOutboxSnapshot {
+                total: 1,
+                pending: 0,
+                acknowledged: 1,
+                failed: 0,
+                queued_pending: 0,
+            }
+        );
     }
 
     #[test]
     fn ipto_write_payload_round_trips_through_codec() {
         let payload = sample_payload();
 
-        let decoded = IpToWritePayload::decode(&payload.encode()).unwrap();
+        let decoded = IptoWritePayload::decode(&payload.encode()).unwrap();
 
         assert_eq!(decoded, payload);
     }
@@ -846,7 +898,7 @@ mod tests {
 
         let mut reader = SegmentReader::open(&path).unwrap();
         let record = reader.read_next().unwrap().unwrap();
-        let decoded = IpToWritePayload::decode(&record.payload).unwrap();
+        let decoded = IptoWritePayload::decode(&record.payload).unwrap();
 
         assert_eq!(decoded, payload);
         fs::remove_file(path).unwrap();
@@ -873,6 +925,9 @@ mod tests {
             DurableOutboxEnqueueResult::Duplicate
         );
         assert_eq!(outbox.outbox().len(), 1);
+        let snapshot = outbox.snapshot();
+        assert_eq!(snapshot.outbox.pending, 1);
+        assert_eq!(snapshot.segment.record_count, 1);
         outbox.seal().unwrap();
 
         let replayed = replay_metadata_outbox_segment(&path).unwrap();
@@ -928,6 +983,16 @@ mod tests {
             }
         );
         assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+        assert_eq!(
+            outbox.snapshot(),
+            MetadataOutboxSnapshot {
+                total: 2,
+                pending: 1,
+                acknowledged: 0,
+                failed: 1,
+                queued_pending: 1,
+            }
+        );
 
         assert!(outbox.retry_failed(&first.idempotency_key));
         assert_eq!(outbox.next_pending().unwrap().payload(), &second);
@@ -973,7 +1038,7 @@ mod tests {
             OutboxEnqueueResult::Enqueued
         );
         let mut writer =
-            RecordingWriter::with_failures(vec![IpToWriteError::retryable("ipto unavailable")]);
+            RecordingWriter::with_failures(vec![IptoWriteError::retryable("ipto unavailable")]);
 
         let summary = drain_pending_outbox(&mut outbox, &mut writer, 10);
 
@@ -992,16 +1057,16 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingWriter {
-        written: Vec<IpToWritePayload>,
-        failures: VecDeque<IpToWriteError>,
+        written: Vec<IptoWritePayload>,
+        failures: VecDeque<IptoWriteError>,
     }
 
     impl RecordingWriter {
         fn retryable_failure(message: impl Into<String>) -> Self {
-            Self::with_failures(vec![IpToWriteError::retryable(message)])
+            Self::with_failures(vec![IptoWriteError::retryable(message)])
         }
 
-        fn with_failures(failures: Vec<IpToWriteError>) -> Self {
+        fn with_failures(failures: Vec<IptoWriteError>) -> Self {
             Self {
                 written: Vec::new(),
                 failures: failures.into(),
@@ -1009,8 +1074,8 @@ mod tests {
         }
     }
 
-    impl IpToWriter for RecordingWriter {
-        fn write(&mut self, payload: &IpToWritePayload) -> Result<(), IpToWriteError> {
+    impl IptoWriter for RecordingWriter {
+        fn write(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError> {
             if let Some(error) = self.failures.pop_front() {
                 return Err(error);
             }
@@ -1033,7 +1098,7 @@ mod tests {
         )
     }
 
-    fn sample_payload() -> IpToWritePayload {
+    fn sample_payload() -> IptoWritePayload {
         let event = sample_event()
             .with_passive_metadata(
                 PassiveMetadata::new()
@@ -1048,14 +1113,14 @@ mod tests {
                 "mask.customer.email",
                 MetadataValue::StringList(vec![String::from("customer.email")]),
             ));
-        let placement = IpToPlacement::new(vec![IpToInstanceId::from("ipto-a")]).unwrap();
-        let mapping = IpToMapping::new("v1")
+        let placement = IptoPlacement::new(vec![IptoInstanceId::from("ipto-a")]).unwrap();
+        let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
             .map_field("metadata.received_at", "attr:provenance.received_at")
             .map_field("mask.customer.email", "attr:provenance.masked_field");
 
-        IpToWritePayload::from_event(&event, &placement, &mapping).unwrap()
+        IptoWritePayload::from_event(&event, &placement, &mapping).unwrap()
     }
 
     fn temp_segment_path(name: &str) -> PathBuf {

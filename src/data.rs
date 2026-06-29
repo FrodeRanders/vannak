@@ -70,7 +70,7 @@ string_id!(IdempotencyKey);
 
 /// Domain placement key for durable metadata ownership.
 ///
-/// This is not a Sitas executor shard id. It selects the IpTo repository
+/// This is not a Sitas executor shard id. It selects the Ipto repository
 /// instance that owns this data individual's durable metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataIndividualShardId(pub u64);

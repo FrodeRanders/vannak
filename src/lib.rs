@@ -19,7 +19,7 @@
 //!
 //! This crate starts with the dependency-free domain layer: typed process
 //! events, metadata references, process-state reduction, and a single-node hot
-//! index. Sitas, Durga, IpTo, and Raft integrations should attach at the module
+//! index. Sitas, Durga, Ipto, and Raft integrations should attach at the module
 //! boundaries rather than changing the core event model.
 
 pub mod cluster;
@@ -37,7 +37,7 @@ pub mod storage;
 
 pub use cluster::{
     CheckpointEpoch, ClusterControlCommand, ClusterControlError, ClusterControlState,
-    IpToPlacementMap, IpToPlacementRange, LeaseEpoch, MetadataOutboxCheckpoint, NodeId,
+    IptoPlacementMap, IptoPlacementRange, LeaseEpoch, MetadataOutboxCheckpoint, NodeId,
     PlacementEpoch, WriterLease,
 };
 pub use data::{
@@ -48,12 +48,12 @@ pub use data::{
 pub use index::{HotIndex, IngestOutcome};
 pub use ingest::{EventId, EventTimestamp, IngestError, PipelineEvent, SourceId, SourceSequence};
 pub use ipto::{
-    DurableOutboxEnqueueResult, IpToAttributeName, IpToInstanceId, IpToMapping,
-    IpToPayloadDecodeError, IpToPlacement, IpToPlacementError, IpToWriteError, IpToWritePayload,
-    IpToWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxDrainSummary,
-    MetadataOutboxEntry, MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus,
-    SegmentBackedMetadataOutbox, deliver_next_pending, drain_pending_outbox,
-    replay_metadata_outbox_segment,
+    DurableOutboxEnqueueResult, IptoAttributeName, IptoInstanceId, IptoMapping,
+    IptoPayloadDecodeError, IptoPlacement, IptoPlacementError, IptoWriteError, IptoWritePayload,
+    IptoWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxDrainSummary,
+    MetadataOutboxEntry, MetadataOutboxSnapshot, MetadataOutboxStorageError, OutboxEnqueueResult,
+    OutboxStatus, SegmentBackedMetadataOutbox, SegmentBackedMetadataOutboxSnapshot,
+    deliver_next_pending, drain_pending_outbox, replay_metadata_outbox_segment,
 };
 pub use metadata::{
     ClassificationId, DataContractId, DatasetId, FieldId, LineageEdgeId, MetadataObjectId,

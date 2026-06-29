@@ -23,7 +23,7 @@
 //! this boundary.
 
 use crate::data::DataIndividualShardId;
-use crate::ipto::IpToInstanceId;
+use crate::ipto::IptoInstanceId;
 use crate::storage::{RecordOffset, SegmentId, SegmentManifest};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -62,19 +62,19 @@ pub struct LeaseEpoch(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CheckpointEpoch(pub u64);
 
-/// Inclusive data-individual shard range assigned to one IpTo instance.
+/// Inclusive data-individual shard range assigned to one Ipto instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToPlacementRange {
+pub struct IptoPlacementRange {
     pub start: DataIndividualShardId,
     pub end: DataIndividualShardId,
-    pub target: IpToInstanceId,
+    pub target: IptoInstanceId,
 }
 
-impl IpToPlacementRange {
+impl IptoPlacementRange {
     pub fn new(
         start: DataIndividualShardId,
         end: DataIndividualShardId,
-        target: IpToInstanceId,
+        target: IptoInstanceId,
     ) -> Result<Self, ClusterControlError> {
         if end < start {
             return Err(ClusterControlError::InvalidPlacementRange { start, end });
@@ -89,15 +89,15 @@ impl IpToPlacementRange {
 
 /// Versioned placement map replicated through Raft.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpToPlacementMap {
+pub struct IptoPlacementMap {
     pub epoch: PlacementEpoch,
-    ranges: Vec<IpToPlacementRange>,
+    ranges: Vec<IptoPlacementRange>,
 }
 
-impl IpToPlacementMap {
+impl IptoPlacementMap {
     pub fn new(
         epoch: PlacementEpoch,
-        mut ranges: Vec<IpToPlacementRange>,
+        mut ranges: Vec<IptoPlacementRange>,
     ) -> Result<Self, ClusterControlError> {
         ranges.sort_by_key(|range| range.start);
         for pair in ranges.windows(2) {
@@ -115,21 +115,21 @@ impl IpToPlacementMap {
         Ok(Self { epoch, ranges })
     }
 
-    pub fn resolve(&self, shard_id: DataIndividualShardId) -> Option<&IpToInstanceId> {
+    pub fn resolve(&self, shard_id: DataIndividualShardId) -> Option<&IptoInstanceId> {
         self.ranges
             .iter()
             .find(|range| range.contains(shard_id))
             .map(|range| &range.target)
     }
 
-    pub fn ranges(&self) -> &[IpToPlacementRange] {
+    pub fn ranges(&self) -> &[IptoPlacementRange] {
         &self.ranges
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterLease {
-    pub target: IpToInstanceId,
+    pub target: IptoInstanceId,
     pub holder: NodeId,
     pub epoch: LeaseEpoch,
 }
@@ -137,7 +137,7 @@ pub struct WriterLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataOutboxCheckpoint {
     pub data_individual_shard_id: DataIndividualShardId,
-    pub target: IpToInstanceId,
+    pub target: IptoInstanceId,
     pub segment_id: SegmentId,
     pub last_acknowledged_offset: RecordOffset,
     pub mapping_version: String,
@@ -149,9 +149,9 @@ pub struct MetadataOutboxCheckpoint {
 #[derive(Debug, Default)]
 pub struct ClusterControlState {
     nodes: BTreeSet<NodeId>,
-    placement_map: Option<IpToPlacementMap>,
-    writer_leases: BTreeMap<IpToInstanceId, WriterLease>,
-    outbox_checkpoints: BTreeMap<(DataIndividualShardId, IpToInstanceId), MetadataOutboxCheckpoint>,
+    placement_map: Option<IptoPlacementMap>,
+    writer_leases: BTreeMap<IptoInstanceId, WriterLease>,
+    outbox_checkpoints: BTreeMap<(DataIndividualShardId, IptoInstanceId), MetadataOutboxCheckpoint>,
     sealed_segments: BTreeMap<SegmentId, SegmentManifest>,
 }
 
@@ -170,7 +170,7 @@ impl ClusterControlState {
                 self.writer_leases
                     .retain(|_, lease| lease.holder != node_id);
             }
-            ClusterControlCommand::SetIpToPlacementMap(map) => {
+            ClusterControlCommand::SetIptoPlacementMap(map) => {
                 if let Some(current) = &self.placement_map
                     && map.epoch <= current.epoch
                 {
@@ -228,22 +228,22 @@ impl ClusterControlState {
         &self.nodes
     }
 
-    pub fn placement_map(&self) -> Option<&IpToPlacementMap> {
+    pub fn placement_map(&self) -> Option<&IptoPlacementMap> {
         self.placement_map.as_ref()
     }
 
-    pub fn resolve_ipto_target(&self, shard_id: DataIndividualShardId) -> Option<&IpToInstanceId> {
+    pub fn resolve_ipto_target(&self, shard_id: DataIndividualShardId) -> Option<&IptoInstanceId> {
         self.placement_map()?.resolve(shard_id)
     }
 
-    pub fn writer_lease(&self, target: &IpToInstanceId) -> Option<&WriterLease> {
+    pub fn writer_lease(&self, target: &IptoInstanceId) -> Option<&WriterLease> {
         self.writer_leases.get(target)
     }
 
     pub fn outbox_checkpoint(
         &self,
         shard_id: DataIndividualShardId,
-        target: &IpToInstanceId,
+        target: &IptoInstanceId,
     ) -> Option<&MetadataOutboxCheckpoint> {
         self.outbox_checkpoints.get(&(shard_id, target.clone()))
     }
@@ -257,7 +257,7 @@ impl ClusterControlState {
 pub enum ClusterControlCommand {
     AddNode(NodeId),
     RemoveNode(NodeId),
-    SetIpToPlacementMap(IpToPlacementMap),
+    SetIptoPlacementMap(IptoPlacementMap),
     GrantWriterLease(WriterLease),
     RecordOutboxCheckpoint(MetadataOutboxCheckpoint),
     RecordSealedSegment(SegmentManifest),
@@ -283,13 +283,13 @@ pub enum ClusterControlError {
         holder: NodeId,
     },
     StaleLeaseEpoch {
-        target: IpToInstanceId,
+        target: IptoInstanceId,
         current: LeaseEpoch,
         proposed: LeaseEpoch,
     },
     StaleCheckpointEpoch {
         shard_id: DataIndividualShardId,
-        target: IpToInstanceId,
+        target: IptoInstanceId,
         current: CheckpointEpoch,
         proposed: CheckpointEpoch,
     },
@@ -300,7 +300,7 @@ impl fmt::Display for ClusterControlError {
         match self {
             Self::InvalidPlacementRange { start, end } => write!(
                 f,
-                "invalid IpTo placement range: start {} is greater than end {}",
+                "invalid Ipto placement range: start {} is greater than end {}",
                 start.0, end.0
             ),
             Self::OverlappingPlacementRanges {
@@ -310,12 +310,12 @@ impl fmt::Display for ClusterControlError {
                 right_end,
             } => write!(
                 f,
-                "overlapping IpTo placement ranges: {}..={} overlaps {}..={}",
+                "overlapping Ipto placement ranges: {}..={} overlaps {}..={}",
                 left_start.0, left_end.0, right_start.0, right_end.0
             ),
             Self::StalePlacementEpoch { current, proposed } => write!(
                 f,
-                "stale IpTo placement epoch: current {}, proposed {}",
+                "stale Ipto placement epoch: current {}, proposed {}",
                 current.0, proposed.0
             ),
             Self::UnknownLeaseHolder { holder } => {
@@ -362,19 +362,19 @@ mod tests {
 
     #[test]
     fn placement_map_resolves_non_overlapping_ranges() {
-        let map = IpToPlacementMap::new(
+        let map = IptoPlacementMap::new(
             PlacementEpoch(1),
             vec![
-                IpToPlacementRange::new(
+                IptoPlacementRange::new(
                     DataIndividualShardId(10),
                     DataIndividualShardId(19),
-                    IpToInstanceId::from("ipto-b"),
+                    IptoInstanceId::from("ipto-b"),
                 )
                 .unwrap(),
-                IpToPlacementRange::new(
+                IptoPlacementRange::new(
                     DataIndividualShardId(0),
                     DataIndividualShardId(9),
-                    IpToInstanceId::from("ipto-a"),
+                    IptoInstanceId::from("ipto-a"),
                 )
                 .unwrap(),
             ],
@@ -383,30 +383,30 @@ mod tests {
 
         assert_eq!(
             map.resolve(DataIndividualShardId(3)),
-            Some(&IpToInstanceId::from("ipto-a"))
+            Some(&IptoInstanceId::from("ipto-a"))
         );
         assert_eq!(
             map.resolve(DataIndividualShardId(12)),
-            Some(&IpToInstanceId::from("ipto-b"))
+            Some(&IptoInstanceId::from("ipto-b"))
         );
         assert_eq!(map.resolve(DataIndividualShardId(20)), None);
     }
 
     #[test]
     fn placement_map_rejects_overlaps() {
-        let error = IpToPlacementMap::new(
+        let error = IptoPlacementMap::new(
             PlacementEpoch(1),
             vec![
-                IpToPlacementRange::new(
+                IptoPlacementRange::new(
                     DataIndividualShardId(0),
                     DataIndividualShardId(10),
-                    IpToInstanceId::from("ipto-a"),
+                    IptoInstanceId::from("ipto-a"),
                 )
                 .unwrap(),
-                IpToPlacementRange::new(
+                IptoPlacementRange::new(
                     DataIndividualShardId(10),
                     DataIndividualShardId(20),
-                    IpToInstanceId::from("ipto-b"),
+                    IptoInstanceId::from("ipto-b"),
                 )
                 .unwrap(),
             ],
@@ -426,14 +426,14 @@ mod tests {
             .apply(ClusterControlCommand::AddNode(NodeId::from("node-a")))
             .unwrap();
         state
-            .apply(ClusterControlCommand::SetIpToPlacementMap(
-                IpToPlacementMap::new(
+            .apply(ClusterControlCommand::SetIptoPlacementMap(
+                IptoPlacementMap::new(
                     PlacementEpoch(1),
                     vec![
-                        IpToPlacementRange::new(
+                        IptoPlacementRange::new(
                             DataIndividualShardId(0),
                             DataIndividualShardId(99),
-                            IpToInstanceId::from("ipto-a"),
+                            IptoInstanceId::from("ipto-a"),
                         )
                         .unwrap(),
                     ],
@@ -444,19 +444,19 @@ mod tests {
 
         assert_eq!(
             state.resolve_ipto_target(DataIndividualShardId(42)),
-            Some(&IpToInstanceId::from("ipto-a"))
+            Some(&IptoInstanceId::from("ipto-a"))
         );
 
         state
             .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
-                target: IpToInstanceId::from("ipto-a"),
+                target: IptoInstanceId::from("ipto-a"),
                 holder: NodeId::from("node-a"),
                 epoch: LeaseEpoch(1),
             }))
             .unwrap();
         assert_eq!(
             state
-                .writer_lease(&IpToInstanceId::from("ipto-a"))
+                .writer_lease(&IptoInstanceId::from("ipto-a"))
                 .unwrap()
                 .holder,
             NodeId::from("node-a")
@@ -466,7 +466,7 @@ mod tests {
             .apply(ClusterControlCommand::RecordOutboxCheckpoint(
                 MetadataOutboxCheckpoint {
                     data_individual_shard_id: DataIndividualShardId(42),
-                    target: IpToInstanceId::from("ipto-a"),
+                    target: IptoInstanceId::from("ipto-a"),
                     segment_id: SegmentId::from("segment-a"),
                     last_acknowledged_offset: RecordOffset(128),
                     mapping_version: String::from("mapping-v1"),
@@ -476,7 +476,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             state
-                .outbox_checkpoint(DataIndividualShardId(42), &IpToInstanceId::from("ipto-a"))
+                .outbox_checkpoint(DataIndividualShardId(42), &IptoInstanceId::from("ipto-a"))
                 .unwrap()
                 .last_acknowledged_offset,
             RecordOffset(128)
@@ -509,7 +509,7 @@ mod tests {
             .unwrap();
         state
             .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
-                target: IpToInstanceId::from("ipto-a"),
+                target: IptoInstanceId::from("ipto-a"),
                 holder: NodeId::from("node-a"),
                 epoch: LeaseEpoch(2),
             }))
@@ -517,7 +517,7 @@ mod tests {
 
         let error = state
             .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
-                target: IpToInstanceId::from("ipto-a"),
+                target: IptoInstanceId::from("ipto-a"),
                 holder: NodeId::from("node-a"),
                 epoch: LeaseEpoch(1),
             }))

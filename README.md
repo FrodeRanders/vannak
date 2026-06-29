@@ -24,7 +24,7 @@ It is meant to connect four related capabilities:
 
 - **Durga** process monitoring: what pipeline process or activity is running,
   completed, failed, escalated, or cancelled;
-- **IpTo** metadata management: what datasets, schemas, attributes, lineage,
+- **Ipto** metadata management: what datasets, schemas, attributes, lineage,
   classifications, contracts, and metadata objects mean;
 - **Sitas** shard-local runtime structure: hot in-memory indexes, explicit
   message passing, owned snapshots, and later CPU/NUMA-aware placement;
@@ -41,7 +41,7 @@ Examples:
 - Which datasets or metadata objects are affected by a failed process activity?
 - What passive and active metadata has been captured for this specific data
   individual?
-- Which IpTo repository instance owns the durable metadata for this data item?
+- Which Ipto repository instance owns the durable metadata for this data item?
 - What changed before an incident started?
 - Which process instance last produced or modified a dataset?
 - Which cluster node owns the hot state, checkpoints, and sealed event segments
@@ -50,7 +50,7 @@ Examples:
 ## Current Status
 
 This repository currently contains the dependency-free Rust core types and
-reducers. It is not yet wired to Durga Kafka topics, IpTo PostgreSQL backends,
+reducers. It is not yet wired to Durga Kafka topics, Ipto PostgreSQL backends,
 Sitas executors, or Raft.
 
 Implemented so far:
@@ -61,17 +61,19 @@ Implemented so far:
 - single-node hot index for process events and metadata-impact lookup;
 - data-individual metadata/provenance event model;
 - passive and active metadata maps;
-- domain-level `DataIndividualShardId` for IpTo placement;
-- IpTo placement resolver;
-- field-to-IpTo-attribute mapping;
-- idempotent IpTo write payload construction;
+- domain-level `DataIndividualShardId` for Ipto placement;
+- Ipto placement resolver;
+- field-to-Ipto-attribute mapping;
+- idempotent Ipto write payload construction;
 - in-memory metadata outbox state for pending, acknowledged, failed, and retry
   behavior;
 - append-only segment storage with checksummed records;
-- deterministic IpTo write-payload codec;
+- deterministic Ipto write-payload codec;
 - segment-backed metadata outbox enqueue and replay;
-- minimal `IpToWriter` boundary and bounded drain helper for delivering pending
-  outbox payloads into a concrete metadata writer.
+- minimal `IptoWriter` boundary and bounded drain helper for delivering pending
+  outbox payloads into a concrete metadata writer;
+- owned metadata outbox snapshots for pending, failed, acknowledged, and segment
+  state.
 
 ## Two Event Planes
 
@@ -136,14 +138,14 @@ Sitas shard id
     where work is currently processed
 
 DataIndividualShardId
-    which IpTo repository instance owns durable metadata for the data item
+    which Ipto repository instance owns durable metadata for the data item
 ```
 
 A Sitas shard may ingest, buffer, index, or retry a metadata event, but final
-IpTo destination is selected by `DataIndividualShardId` through an explicit
-IpTo placement resolver.
+Ipto destination is selected by `DataIndividualShardId` through an explicit
+Ipto placement resolver.
 
-This matters because multiple IpTo PostgreSQL instances may exist with the same
+This matters because multiple Ipto PostgreSQL instances may exist with the same
 schema/content model, while ownership is determined by data-individual domain
 placement rather than executor placement.
 
@@ -157,17 +159,17 @@ The intended flow is:
 ```text
 metadata event
     -> validate
-    -> resolve DataIndividualShardId to IpToInstanceId
-    -> map metadata fields to IpTo attributes/templates
-    -> persist to durable outbox or write idempotently to IpTo
+    -> resolve DataIndividualShardId to IptoInstanceId
+    -> map metadata fields to Ipto attributes/templates
+    -> persist to durable outbox or write idempotently to Ipto
     -> acknowledge capture
     -> retry until acknowledged
 ```
 
 The current code includes both an in-memory outbox model and a segment-backed
-outbox wrapper. The durable wrapper appends and syncs the encoded IpTo write
+outbox wrapper. The durable wrapper appends and syncs the encoded Ipto write
 payload before making it visible as pending in memory, and replay can rebuild
-pending delivery state from the segment. Acknowledgement checkpoints and IpTo
+pending delivery state from the segment. Acknowledgement checkpoints and Ipto
 writer tasks are still future work.
 
 ## Crate Layout
@@ -179,7 +181,7 @@ src/
   durga.rs          Durga monitor compatibility types
   index.rs          dependency-free hot index
   ingest.rs         Vannak process event envelope
-  ipto.rs           IpTo placement, mapping, write payload, and outbox model
+  ipto.rs           Ipto placement, mapping, write payload, and outbox model
   metadata.rs       typed metadata references
   observability.rs  owned snapshot types
   process.rs        process reducer and current-state view
@@ -208,12 +210,13 @@ Current test coverage exercises:
 - process state reduction;
 - metadata impact indexing;
 - duplicate event idempotency;
-- IpTo placement by `DataIndividualShardId`;
-- metadata mapping into IpTo write payloads;
+- Ipto placement by `DataIndividualShardId`;
+- metadata mapping into Ipto write payloads;
 - metadata outbox duplicate detection and acknowledgment;
 - segment-backed metadata outbox replay;
-- IpTo writer success/failure handling;
-- bounded outbox draining.
+- Ipto writer success/failure handling;
+- bounded outbox draining;
+- metadata outbox snapshot counts.
 
 ## Design Direction
 
@@ -222,7 +225,7 @@ Near-term growth order:
 1. Keep the Durga-compatible process event model aligned with Durga monitor.
 2. Stabilize data-individual identity and provenance metadata events.
 3. Add persistent append-only event/outbox segments.
-4. Add an IpTo writer adapter with idempotent writes.
+4. Add an Ipto writer adapter with idempotent writes.
 5. Add Sitas-backed shard-local execution and query fanout.
 6. Add Raft-backed placement maps, checkpoints, and segment manifests.
 7. Add recovery and ownership-transfer semantics.
@@ -232,7 +235,7 @@ Near-term growth order:
 Vannak is not initially:
 
 - a replacement workflow engine for Durga;
-- a replacement metadata catalog for IpTo;
+- a replacement metadata catalog for Ipto;
 - a distributed SQL engine;
 - a generic full-text log search product;
 - a consensus-replicated event firehose;

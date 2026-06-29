@@ -27,7 +27,7 @@ The project combines four existing lines of work:
 - Sitas: a Rust-native shard-per-core runtime and service model;
 - Durga: data-pipeline/process management with BPMN-like process state and
   monitoring;
-- IpTo: metadata management and semantic object modeling;
+- Ipto: metadata management and semantic object modeling;
 - a Rust Raft implementation: replicated agreement for cluster control state.
 
 The goal is not to build another generic log collector. Vannak should connect
@@ -41,7 +41,7 @@ operators can answer questions such as:
 - Which classified or governed data moved through which process step?
 - What passive and active metadata has been captured for this specific data
   individual?
-- Which IpTo repository instance owns the durable metadata for this data
+- Which Ipto repository instance owns the durable metadata for this data
   individual?
 - What is the current cluster view of ownership, checkpoints, and sealed event
   segments?
@@ -60,14 +60,14 @@ architecture:
    cross-shard transfer, and observable runtime behavior.
 4. Use Durga process events as semantically meaningful state transitions, not
    as unstructured logs.
-5. Use IpTo metadata to connect runtime events to datasets, schemas, lineage,
+5. Use Ipto metadata to connect runtime events to datasets, schemas, lineage,
    ownership, classifications, contracts, and versions.
 6. Treat data-individual metadata capture as a durable provenance plane, not
    merely as monitoring data.
-7. Route writes to IpTo by domain metadata placement, such as
+7. Route writes to Ipto by domain metadata placement, such as
    `DataIndividualShardId`; do not confuse that with Sitas executor shard ids.
 8. Do not acknowledge durable data-individual metadata capture until the event
-   is safely persisted to an outbox/segment or written idempotently to IpTo.
+   is safely persisted to an outbox/segment or written idempotently to Ipto.
 9. Keep ordinary application state shard-local. Do not normalize service state
    behind `Arc<Mutex<_>>` as the main programming model.
 10. Make cross-shard movement explicit through typed messages, typed submitter
@@ -85,11 +85,11 @@ that leave room for clustering:
 
 - ingest structured Durga process events;
 - ingest data-individual metadata events carrying passive and active metadata;
-- enrich or correlate events with IpTo metadata references;
+- enrich or correlate events with Ipto metadata references;
 - maintain shard-local current pipeline/process-instance state;
 - maintain recent event and metadata-impact indexes;
-- maintain a durable outbox for metadata writes that must reach IpTo;
-- route metadata writes to IpTo instances by data-individual placement;
+- maintain a durable outbox for metadata writes that must reach Ipto;
+- route metadata writes to Ipto instances by data-individual placement;
 - query by pipeline, process instance, dataset, metadata object, status, and
   time range;
 - expose owned service and runtime snapshots;
@@ -108,8 +108,8 @@ src/
   ingest/          typed external event intake and validation
   process/         Durga process-event model and state reducers
   data/            data-individual identity, metadata events, provenance facts
-  metadata/        IpTo adapter and metadata reference model
-  ipto/            IpTo placement, mapping, writer, and durable outbox
+  metadata/        Ipto adapter and metadata reference model
+  ipto/            Ipto placement, mapping, writer, and durable outbox
   index/           shard-local indexes and query primitives
   query/           scatter/gather query APIs and result types
   storage/         append-only segment writer/reader and manifests
@@ -128,15 +128,15 @@ docs/
 - Prefer typed event enums and typed service APIs over unstructured maps.
 - Treat Durga events as process facts with causality, activity identity, and
   lifecycle meaning.
-- Treat IpTo metadata references as first-class identifiers, not opaque strings
+- Treat Ipto metadata references as first-class identifiers, not opaque strings
   sprinkled through payloads.
 - Treat data individuals as first-class identities. Metadata about a flowing
   data item should be attached to a stable `DataIndividualId`.
 - Distinguish passive metadata (received time, source, format, checksum) from
   active metadata (masking, transformation, validation, enrichment, field
   changes).
-- Make IpTo placement explicit and deterministic. A Sitas shard may process a
-  metadata event, but `DataIndividualShardId` decides which IpTo instance owns
+- Make Ipto placement explicit and deterministic. A Sitas shard may process a
+  metadata event, but `DataIndividualShardId` decides which Ipto instance owns
   the durable metadata.
 - Persist metadata events to an outbox or segment before acknowledging capture
   when loss would be unacceptable.
@@ -157,9 +157,9 @@ When implementation begins, tests should cover:
 - state reduction from ordered Durga events;
 - out-of-order or duplicate event handling policy;
 - shard routing and cross-shard query fanout;
-- IpTo placement from data-individual shard id;
-- durable metadata outbox replay and idempotent IpTo writes;
-- passive and active metadata mapping into IpTo attributes/templates;
+- Ipto placement from data-individual shard id;
+- durable metadata outbox replay and idempotent Ipto writes;
+- passive and active metadata mapping into Ipto attributes/templates;
 - metadata correlation and missing-metadata behavior;
 - segment sealing and manifest creation;
 - restart/recovery from local segments and Raft checkpoints;
@@ -175,7 +175,7 @@ Update `ARCHITECTURE.md` when changing:
 - process-state reducer semantics;
 - data-individual identity and metadata-event semantics;
 - metadata correlation model;
-- IpTo placement and mapping rules;
+- Ipto placement and mapping rules;
 - shard placement/routing;
 - query model;
 - storage segment format;
@@ -195,10 +195,10 @@ Do not implement these unless explicitly requested:
 - generic log-search product scope;
 - distributed object storage;
 - full workflow engine replacement for Durga;
-- full metadata-authoring replacement for IpTo;
+- full metadata-authoring replacement for Ipto;
 - consensus replication of every raw event;
 - treating durable data-individual provenance as best-effort monitoring;
-- coupling IpTo placement to Sitas executor shard ids;
+- coupling Ipto placement to Sitas executor shard ids;
 - global load balancing before ownership and checkpoint semantics are clear;
 - exactly-once external side effects;
 - browser UI before the core ingest/query/control APIs are coherent.
@@ -208,12 +208,12 @@ Do not implement these unless explicitly requested:
 Grow Vannak in this order:
 
 1. Define Durga-compatible process events and metadata-reference model.
-2. Define data-individual identity, passive metadata, active metadata, and IpTo
+2. Define data-individual identity, passive metadata, active metadata, and Ipto
    placement.
 3. Build a single-node shard-local hot index.
 4. Add typed query APIs and owned snapshots.
 5. Add durable local segments/outbox for metadata events.
-6. Add IpTo mapping and idempotent writer.
+6. Add Ipto mapping and idempotent writer.
 7. Add Raft-backed cluster control state.
 8. Add checkpoint and recovery semantics.
 9. Add richer metadata impact analysis.
