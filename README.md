@@ -76,7 +76,8 @@ Implemented so far:
   state;
 - segment-offset tracking for acknowledged durable outbox entries, allowing
   checkpoint data to be proposed through the cluster control plane;
-- checkpoint-aware outbox segment replay that skips acknowledged offsets.
+- checkpoint-aware outbox segment replay that skips acknowledged offsets and
+  returns an owned replay summary.
 
 ## Two Event Planes
 

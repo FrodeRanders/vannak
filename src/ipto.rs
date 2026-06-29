@@ -725,25 +725,48 @@ impl From<IptoPayloadDecodeError> for MetadataOutboxStorageError {
 pub fn replay_metadata_outbox_segment(
     path: impl AsRef<Path>,
 ) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
-    replay_metadata_outbox_segment_after(path, None)
+    Ok(replay_metadata_outbox_segment_after(path, None)?.outbox)
 }
 
 pub fn replay_metadata_outbox_segment_after(
     path: impl AsRef<Path>,
     checkpoint_offset: Option<RecordOffset>,
-) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
+) -> Result<MetadataOutboxReplay, MetadataOutboxStorageError> {
     let mut reader = SegmentReader::open(path)?;
     let mut outbox = MetadataOutbox::new();
+    let mut summary = MetadataOutboxReplaySummary {
+        checkpoint_offset,
+        scanned_records: 0,
+        skipped_records: 0,
+        replayed_records: 0,
+    };
 
     while let Some(record) = reader.read_next()? {
+        summary.scanned_records += 1;
         if checkpoint_offset.is_some_and(|offset| record.offset <= offset) {
+            summary.skipped_records += 1;
             continue;
         }
         let payload = IptoWritePayload::decode(&record.payload)?;
         let _ = outbox.enqueue_with_offset(payload, Some(record.offset));
+        summary.replayed_records += 1;
     }
 
-    Ok(outbox)
+    Ok(MetadataOutboxReplay { outbox, summary })
+}
+
+#[derive(Debug)]
+pub struct MetadataOutboxReplay {
+    pub outbox: MetadataOutbox,
+    pub summary: MetadataOutboxReplaySummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataOutboxReplaySummary {
+    pub checkpoint_offset: Option<RecordOffset>,
+    pub scanned_records: usize,
+    pub skipped_records: usize,
+    pub replayed_records: usize,
 }
 
 fn write_u32(out: &mut Vec<u8>, value: u32) {
@@ -1052,11 +1075,20 @@ mod tests {
         outbox.seal().unwrap();
 
         let replayed = replay_metadata_outbox_segment_after(&path, Some(first_offset)).unwrap();
-        let pending = replayed.next_pending().unwrap();
+        let pending = replayed.outbox.next_pending().unwrap();
 
         assert_eq!(pending.payload(), &second);
         assert_eq!(pending.record_offset(), Some(second_offset));
-        assert_eq!(replayed.snapshot().total, 1);
+        assert_eq!(replayed.outbox.snapshot().total, 1);
+        assert_eq!(
+            replayed.summary,
+            MetadataOutboxReplaySummary {
+                checkpoint_offset: Some(first_offset),
+                scanned_records: 2,
+                skipped_records: 1,
+                replayed_records: 1,
+            }
+        );
 
         fs::remove_file(path).unwrap();
     }

@@ -528,7 +528,7 @@ The current Rust foundation includes a segment-backed metadata outbox boundary:
 - `replay_metadata_outbox_segment` rebuilds pending delivery state by reading
   payload records from a segment;
 - `replay_metadata_outbox_segment_after` rebuilds only entries after a committed
-  checkpoint offset;
+  checkpoint offset and returns an owned `MetadataOutboxReplaySummary`;
 - `MetadataOutboxSnapshot` and `SegmentBackedMetadataOutboxSnapshot` expose
   owned observability state without borrowing outbox internals;
 - acknowledged segment-backed entries retain record offsets and can produce
