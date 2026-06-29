@@ -70,8 +70,8 @@ Implemented so far:
 - append-only segment storage with checksummed records;
 - deterministic IpTo write-payload codec;
 - segment-backed metadata outbox enqueue and replay;
-- minimal `IpToWriter` boundary for draining pending outbox payloads into a
-  concrete metadata writer.
+- minimal `IpToWriter` boundary and bounded drain helper for delivering pending
+  outbox payloads into a concrete metadata writer.
 
 ## Two Event Planes
 
@@ -212,7 +212,8 @@ Current test coverage exercises:
 - metadata mapping into IpTo write payloads;
 - metadata outbox duplicate detection and acknowledgment;
 - segment-backed metadata outbox replay;
-- IpTo writer success/failure handling.
+- IpTo writer success/failure handling;
+- bounded outbox draining.
 
 ## Design Direction
 

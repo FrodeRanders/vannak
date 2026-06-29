@@ -50,9 +50,10 @@ pub use ingest::{EventId, EventTimestamp, IngestError, PipelineEvent, SourceId, 
 pub use ipto::{
     DurableOutboxEnqueueResult, IpToAttributeName, IpToInstanceId, IpToMapping,
     IpToPayloadDecodeError, IpToPlacement, IpToPlacementError, IpToWriteError, IpToWritePayload,
-    IpToWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxEntry,
-    MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus, SegmentBackedMetadataOutbox,
-    deliver_next_pending, replay_metadata_outbox_segment,
+    IpToWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxDrainSummary,
+    MetadataOutboxEntry, MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus,
+    SegmentBackedMetadataOutbox, deliver_next_pending, drain_pending_outbox,
+    replay_metadata_outbox_segment,
 };
 pub use metadata::{
     ClassificationId, DataContractId, DatasetId, FieldId, LineageEdgeId, MetadataObjectId,

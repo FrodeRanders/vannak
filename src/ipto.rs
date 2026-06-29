@@ -472,6 +472,53 @@ pub fn deliver_next_pending(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataOutboxDrainSummary {
+    pub attempted: usize,
+    pub acknowledged: usize,
+    pub failed: usize,
+    pub stopped_after_failure: bool,
+}
+
+impl MetadataOutboxDrainSummary {
+    pub fn is_empty(&self) -> bool {
+        self.attempted == 0
+    }
+}
+
+pub fn drain_pending_outbox(
+    outbox: &mut MetadataOutbox,
+    writer: &mut impl IpToWriter,
+    max_attempts: usize,
+) -> MetadataOutboxDrainSummary {
+    let mut summary = MetadataOutboxDrainSummary {
+        attempted: 0,
+        acknowledged: 0,
+        failed: 0,
+        stopped_after_failure: false,
+    };
+
+    for _ in 0..max_attempts {
+        match deliver_next_pending(outbox, writer) {
+            MetadataOutboxDeliveryResult::NoPending => break,
+            MetadataOutboxDeliveryResult::Acknowledged { .. } => {
+                summary.attempted += 1;
+                summary.acknowledged += 1;
+            }
+            MetadataOutboxDeliveryResult::Failed { retryable, .. } => {
+                summary.attempted += 1;
+                summary.failed += 1;
+                summary.stopped_after_failure = retryable;
+                if retryable {
+                    break;
+                }
+            }
+        }
+    }
+
+    summary
+}
+
 #[derive(Debug)]
 pub struct SegmentBackedMetadataOutbox {
     outbox: MetadataOutbox,
@@ -886,24 +933,85 @@ mod tests {
         assert_eq!(outbox.next_pending().unwrap().payload(), &second);
     }
 
+    #[test]
+    fn outbox_drain_respects_max_attempts() {
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.idempotency_key = IdempotencyKey::from("data-2:metadata-event-2");
+        let mut outbox = MetadataOutbox::new();
+        assert_eq!(outbox.enqueue(first.clone()), OutboxEnqueueResult::Enqueued);
+        assert_eq!(
+            outbox.enqueue(second.clone()),
+            OutboxEnqueueResult::Enqueued
+        );
+        let mut writer = RecordingWriter::default();
+
+        let summary = drain_pending_outbox(&mut outbox, &mut writer, 1);
+
+        assert_eq!(
+            summary,
+            MetadataOutboxDrainSummary {
+                attempted: 1,
+                acknowledged: 1,
+                failed: 0,
+                stopped_after_failure: false,
+            }
+        );
+        assert_eq!(writer.written, vec![first]);
+        assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+    }
+
+    #[test]
+    fn outbox_drain_stops_after_retryable_failure() {
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.idempotency_key = IdempotencyKey::from("data-2:metadata-event-2");
+        let mut outbox = MetadataOutbox::new();
+        assert_eq!(outbox.enqueue(first.clone()), OutboxEnqueueResult::Enqueued);
+        assert_eq!(
+            outbox.enqueue(second.clone()),
+            OutboxEnqueueResult::Enqueued
+        );
+        let mut writer =
+            RecordingWriter::with_failures(vec![IpToWriteError::retryable("ipto unavailable")]);
+
+        let summary = drain_pending_outbox(&mut outbox, &mut writer, 10);
+
+        assert_eq!(
+            summary,
+            MetadataOutboxDrainSummary {
+                attempted: 1,
+                acknowledged: 0,
+                failed: 1,
+                stopped_after_failure: true,
+            }
+        );
+        assert!(writer.written.is_empty());
+        assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+    }
+
     #[derive(Default)]
     struct RecordingWriter {
         written: Vec<IpToWritePayload>,
-        failure: Option<IpToWriteError>,
+        failures: VecDeque<IpToWriteError>,
     }
 
     impl RecordingWriter {
         fn retryable_failure(message: impl Into<String>) -> Self {
+            Self::with_failures(vec![IpToWriteError::retryable(message)])
+        }
+
+        fn with_failures(failures: Vec<IpToWriteError>) -> Self {
             Self {
                 written: Vec::new(),
-                failure: Some(IpToWriteError::retryable(message)),
+                failures: failures.into(),
             }
         }
     }
 
     impl IpToWriter for RecordingWriter {
         fn write(&mut self, payload: &IpToWritePayload) -> Result<(), IpToWriteError> {
-            if let Some(error) = self.failure.clone() {
+            if let Some(error) = self.failures.pop_front() {
                 return Err(error);
             }
             self.written.push(payload.clone());
