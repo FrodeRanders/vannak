@@ -21,13 +21,18 @@
 //! `IpToWritePayload` into calls against the Rust IpTo repository API or direct
 //! PostgreSQL-backed repositories.
 
+use crate::NodeId;
 use crate::data::{
     DataIndividualMetadataEvent, DataIndividualShardId, IdempotencyKey, MetadataFieldName,
     MetadataValue,
 };
 use crate::ingest::EventTimestamp;
+use crate::storage::{
+    RecordOffset, SegmentError, SegmentId, SegmentManifest, SegmentReader, SegmentWriter,
+};
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IpToInstanceId(String);
@@ -376,6 +381,123 @@ pub enum OutboxEnqueueResult {
     Duplicate,
 }
 
+#[derive(Debug)]
+pub struct SegmentBackedMetadataOutbox {
+    outbox: MetadataOutbox,
+    writer: SegmentWriter,
+}
+
+impl SegmentBackedMetadataOutbox {
+    pub fn create(
+        path: impl AsRef<Path>,
+        segment_id: SegmentId,
+        node_id: NodeId,
+    ) -> Result<Self, MetadataOutboxStorageError> {
+        Ok(Self {
+            outbox: MetadataOutbox::new(),
+            writer: SegmentWriter::create(path, segment_id, node_id)?,
+        })
+    }
+
+    pub fn enqueue_durable(
+        &mut self,
+        payload: IpToWritePayload,
+    ) -> Result<DurableOutboxEnqueueResult, MetadataOutboxStorageError> {
+        if self.outbox.entries.contains_key(&payload.idempotency_key) {
+            return Ok(DurableOutboxEnqueueResult::Duplicate);
+        }
+
+        let offset = self.writer.append_record(&payload.encode())?;
+        self.writer.sync()?;
+        debug_assert_eq!(self.outbox.enqueue(payload), OutboxEnqueueResult::Enqueued);
+        Ok(DurableOutboxEnqueueResult::Enqueued { offset })
+    }
+
+    pub fn flush(&mut self) -> Result<(), MetadataOutboxStorageError> {
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    pub fn sync(&mut self) -> Result<(), MetadataOutboxStorageError> {
+        self.writer.sync()?;
+        Ok(())
+    }
+
+    pub fn manifest(&self) -> SegmentManifest {
+        self.writer.manifest()
+    }
+
+    pub fn seal(self) -> Result<SegmentManifest, MetadataOutboxStorageError> {
+        Ok(self.writer.seal()?)
+    }
+
+    pub fn outbox(&self) -> &MetadataOutbox {
+        &self.outbox
+    }
+
+    pub fn outbox_mut(&mut self) -> &mut MetadataOutbox {
+        &mut self.outbox
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurableOutboxEnqueueResult {
+    Enqueued { offset: RecordOffset },
+    Duplicate,
+}
+
+#[derive(Debug)]
+pub enum MetadataOutboxStorageError {
+    Segment(SegmentError),
+    PayloadDecode(IpToPayloadDecodeError),
+}
+
+impl fmt::Display for MetadataOutboxStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Segment(error) => write!(f, "metadata outbox segment error: {error}"),
+            Self::PayloadDecode(error) => {
+                write!(f, "metadata outbox payload decode error: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MetadataOutboxStorageError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Segment(error) => Some(error),
+            Self::PayloadDecode(error) => Some(error),
+        }
+    }
+}
+
+impl From<SegmentError> for MetadataOutboxStorageError {
+    fn from(value: SegmentError) -> Self {
+        Self::Segment(value)
+    }
+}
+
+impl From<IpToPayloadDecodeError> for MetadataOutboxStorageError {
+    fn from(value: IpToPayloadDecodeError) -> Self {
+        Self::PayloadDecode(value)
+    }
+}
+
+pub fn replay_metadata_outbox_segment(
+    path: impl AsRef<Path>,
+) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
+    let mut reader = SegmentReader::open(path)?;
+    let mut outbox = MetadataOutbox::new();
+
+    while let Some(record) = reader.read_next()? {
+        let payload = IpToWritePayload::decode(&record.payload)?;
+        let _ = outbox.enqueue(payload);
+    }
+
+    Ok(outbox)
+}
+
 fn write_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
@@ -589,6 +711,36 @@ mod tests {
         let decoded = IpToWritePayload::decode(&record.payload).unwrap();
 
         assert_eq!(decoded, payload);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn segment_backed_outbox_persists_before_pending_delivery() {
+        let path = temp_segment_path("durable-outbox");
+        let payload = sample_payload();
+        let mut outbox = SegmentBackedMetadataOutbox::create(
+            &path,
+            SegmentId::from("outbox-segment-a"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let result = outbox.enqueue_durable(payload.clone()).unwrap();
+        assert!(matches!(
+            result,
+            DurableOutboxEnqueueResult::Enqueued { .. }
+        ));
+        assert_eq!(
+            outbox.enqueue_durable(payload.clone()).unwrap(),
+            DurableOutboxEnqueueResult::Duplicate
+        );
+        assert_eq!(outbox.outbox().len(), 1);
+        outbox.seal().unwrap();
+
+        let replayed = replay_metadata_outbox_segment(&path).unwrap();
+        let pending = replayed.next_pending().unwrap();
+        assert_eq!(pending.payload(), &payload);
+
         fs::remove_file(path).unwrap();
     }
 

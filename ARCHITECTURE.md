@@ -520,6 +520,19 @@ Outbox entries should include:
 Idempotency is required because replay after failure may resend the same
 metadata event to IpTo.
 
+The current Rust foundation includes a segment-backed metadata outbox boundary:
+
+- `IpToWritePayload` has a deterministic dependency-free binary codec;
+- `SegmentBackedMetadataOutbox` appends and syncs the encoded payload to a
+  local segment before inserting it into the pending in-memory outbox;
+- `replay_metadata_outbox_segment` rebuilds pending delivery state by reading
+  payload records from a segment.
+
+This is intentionally only the local persistence and replay boundary. Durable
+acknowledgement state, retry backoff, writer leases, and checkpoint publication
+remain separate concerns so they can be attached to Raft-controlled ownership
+without changing code that produces metadata write payloads.
+
 ## 9. Raft-Controlled State
 
 Raft should own compact cluster state:
@@ -821,8 +834,8 @@ These policies should be typed configuration, not scattered conditionals.
 
 ### Phase 4: Local Durability
 
-- Add append-only segment writer.
-- Add durable metadata outbox.
+- Add append-only segment writer. [done: local checksummed segment writer]
+- Add durable metadata outbox. [done: segment-backed payload enqueue/replay]
 - Seal segments by size/time.
 - Persist segment summaries.
 - Rebuild hot state from segments.

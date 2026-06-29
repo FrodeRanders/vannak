@@ -66,7 +66,10 @@ Implemented so far:
 - field-to-IpTo-attribute mapping;
 - idempotent IpTo write payload construction;
 - in-memory metadata outbox state for pending, acknowledged, failed, and retry
-  behavior.
+  behavior;
+- append-only segment storage with checksummed records;
+- deterministic IpTo write-payload codec;
+- segment-backed metadata outbox enqueue and replay.
 
 ## Two Event Planes
 
@@ -159,9 +162,11 @@ metadata event
     -> retry until acknowledged
 ```
 
-The current code includes an in-memory outbox model. A later storage layer should
-persist outbox entries to append-only segments before acknowledging capture when
-loss is unacceptable.
+The current code includes both an in-memory outbox model and a segment-backed
+outbox wrapper. The durable wrapper appends and syncs the encoded IpTo write
+payload before making it visible as pending in memory, and replay can rebuild
+pending delivery state from the segment. Acknowledgement checkpoints and IpTo
+writer tasks are still future work.
 
 ## Crate Layout
 
@@ -203,7 +208,8 @@ Current test coverage exercises:
 - duplicate event idempotency;
 - IpTo placement by `DataIndividualShardId`;
 - metadata mapping into IpTo write payloads;
-- metadata outbox duplicate detection and acknowledgment.
+- metadata outbox duplicate detection and acknowledgment;
+- segment-backed metadata outbox replay.
 
 ## Design Direction
 
