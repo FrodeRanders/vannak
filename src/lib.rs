@@ -40,9 +40,9 @@ pub mod runtime;
 pub mod storage;
 
 pub use cluster::{
-    CheckpointEpoch, ClusterControlCommand, ClusterControlError, ClusterControlState,
-    IptoPlacementMap, IptoPlacementRange, IptoPlacementRing, IptoPlacementSlot, LeaseEpoch,
-    MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
+    CheckpointEpoch, CheckpointManifest, ClusterControlCommand, ClusterControlError,
+    ClusterControlState, IptoPlacementMap, IptoPlacementRange, IptoPlacementRing,
+    IptoPlacementSlot, LeaseEpoch, MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
 };
 pub use data::{
     ActiveMetadata, DataIndividualId, DataIndividualMetadataEvent, DataIndividualShardId,

@@ -87,7 +87,12 @@ Implemented so far:
   (`IptoRepoWriter`) backed by `ipto_rust::RepoService` (PostgreSQL);
 - deterministic correlation-id (UUID v7) generation from `IdempotencyKey` for
   idempotent Ipto writes;
-- built-in PROV-O SDL schema for provenance attribute and template registration.
+- built-in PROV-O SDL schema for provenance attribute and template registration;
+- optional `raft` feature flag with `ClusterStateMachine`: a `graft_core::StateMachine`
+  adapter wrapping `ClusterControlState` behind `std::sync::RwLock`, with JSON
+  command/snapshot encoding and 7 read-query types;
+- `CheckpointManifest` for Raft-replicated shard recovery checkpoints,
+  recording segment consumption progress per checkpoint epoch.
 
 ## Two Event Planes
 

@@ -24,15 +24,16 @@
 //! can be shared across Raft threads behind an `Arc`.
 
 use crate::cluster::{
-    CheckpointEpoch, ClusterControlCommand, ClusterControlError, ClusterControlState,
-    IptoPlacementMap, IptoPlacementSlot, IptoPlacementRange, LeaseEpoch, MetadataOutboxCheckpoint,
-    NodeId, PlacementEpoch, WriterLease,
+    CheckpointEpoch, CheckpointManifest, ClusterControlCommand, ClusterControlError,
+    ClusterControlState, IptoPlacementMap, IptoPlacementSlot, IptoPlacementRange, LeaseEpoch,
+    MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
 };
 use crate::data::DataIndividualShardId;
 use crate::ipto::IptoInstanceId;
 use crate::storage::{RecordOffset, SegmentId, SegmentManifest};
 use graft_core::state_machine::{QueryableStateMachine, StateMachine};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
 
@@ -88,12 +89,29 @@ struct SerSegmentManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerCheckpointManifest {
+    checkpoint_id: String,
+    node_id: String,
+    epoch: u64,
+    segment_offsets: Vec<SerSegmentOffset>,
+    metadata_version: Option<String>,
+    checksum: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerSegmentOffset {
+    segment_id: String,
+    offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SerClusterControlSnapshot {
     nodes: Vec<String>,
     placement_maps: Vec<SerPlacementMap>,
     writer_leases: Vec<SerWriterLease>,
     outbox_checkpoints: Vec<SerOutboxCheckpoint>,
     sealed_segments: Vec<SerSegmentManifest>,
+    checkpoints: Vec<SerCheckpointManifest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,6 +153,14 @@ enum SerCommandVariant {
         path: String,
         record_count: u64,
         byte_len: u64,
+        checksum: u64,
+    },
+    RecordCheckpoint {
+        checkpoint_id: String,
+        node_id: String,
+        epoch: u64,
+        segment_offsets: Vec<SerSegmentOffset>,
+        metadata_version: Option<String>,
         checksum: u64,
     },
 }
@@ -235,6 +261,23 @@ pub(crate) fn encode_command(cmd: &ClusterControlCommand) -> Result<Vec<u8>, ser
                 checksum: manifest.checksum,
             },
         },
+        ClusterControlCommand::RecordCheckpoint(cp) => SerClusterControlCommand {
+            variant: SerCommandVariant::RecordCheckpoint {
+                checkpoint_id: cp.checkpoint_id.clone(),
+                node_id: cp.node_id.as_str().to_string(),
+                epoch: cp.epoch.0,
+                segment_offsets: cp
+                    .segment_offsets
+                    .iter()
+                    .map(|(seg_id, offset)| SerSegmentOffset {
+                        segment_id: seg_id.as_str().to_string(),
+                        offset: offset.0,
+                    })
+                    .collect(),
+                metadata_version: cp.metadata_version.clone(),
+                checksum: cp.checksum,
+            },
+        },
     };
     serde_json::to_vec(&ser_cmd)
 }
@@ -300,6 +343,34 @@ pub(crate) fn decode_command(data: &[u8]) -> Result<ClusterControlCommand, Strin
             byte_len,
             checksum,
         })),
+        SerCommandVariant::RecordCheckpoint {
+            checkpoint_id,
+            node_id,
+            epoch,
+            segment_offsets,
+            metadata_version,
+            checksum,
+        } => {
+            let offsets: BTreeMap<SegmentId, RecordOffset> = segment_offsets
+                .iter()
+                .map(|so| {
+                    (
+                        SegmentId::from(so.segment_id.as_str()),
+                        RecordOffset(so.offset),
+                    )
+                })
+                .collect();
+            Ok(ClusterControlCommand::RecordCheckpoint(
+                CheckpointManifest {
+                    checkpoint_id,
+                    node_id: NodeId::from(node_id.as_str()),
+                    epoch: CheckpointEpoch(epoch),
+                    segment_offsets: offsets,
+                    metadata_version,
+                    checksum,
+                },
+            ))
+        },
     }
 }
 
@@ -349,6 +420,25 @@ fn encode_snapshot(state: &ClusterControlState) -> Result<Vec<u8>, serde_json::E
                 record_count: manifest.record_count,
                 byte_len: manifest.byte_len,
                 checksum: manifest.checksum,
+            })
+            .collect(),
+        checkpoints: state
+            .checkpoints()
+            .values()
+            .map(|cp| SerCheckpointManifest {
+                checkpoint_id: cp.checkpoint_id.clone(),
+                node_id: cp.node_id.as_str().to_string(),
+                epoch: cp.epoch.0,
+                segment_offsets: cp
+                    .segment_offsets
+                    .iter()
+                    .map(|(seg_id, offset)| SerSegmentOffset {
+                        segment_id: seg_id.as_str().to_string(),
+                        offset: offset.0,
+                    })
+                    .collect(),
+                metadata_version: cp.metadata_version.clone(),
+                checksum: cp.checksum,
             })
             .collect(),
     };
@@ -417,6 +507,31 @@ fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
                 byte_len: seg_data.byte_len,
                 checksum: seg_data.checksum,
             }))
+            .map_err(|e| e.to_string())?;
+    }
+
+    for cp_data in &snapshot.checkpoints {
+        let offsets: BTreeMap<SegmentId, RecordOffset> = cp_data
+            .segment_offsets
+            .iter()
+            .map(|so| {
+                (
+                    SegmentId::from(so.segment_id.as_str()),
+                    RecordOffset(so.offset),
+                )
+            })
+            .collect();
+        state
+            .apply(ClusterControlCommand::RecordCheckpoint(
+                CheckpointManifest {
+                    checkpoint_id: cp_data.checkpoint_id.clone(),
+                    node_id: NodeId::from(cp_data.node_id.as_str()),
+                    epoch: CheckpointEpoch(cp_data.epoch),
+                    segment_offsets: offsets,
+                    metadata_version: cp_data.metadata_version.clone(),
+                    checksum: cp_data.checksum,
+                },
+            ))
             .map_err(|e| e.to_string())?;
     }
 
@@ -702,5 +817,41 @@ mod tests {
         let query = serde_json::to_vec(&ClusterQuery::ResolveWithFallback { shard_id: 42 }).unwrap();
         let result: Vec<String> = serde_json::from_slice(&sm.query(&query)).unwrap();
         assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_manifest_round_trips() {
+        let mut offsets = BTreeMap::new();
+        offsets.insert(SegmentId::from("seg-1"), RecordOffset(1024));
+        offsets.insert(SegmentId::from("seg-2"), RecordOffset(2048));
+
+        let cp = CheckpointManifest::new(
+            "cp-001",
+            NodeId::from("node-a"),
+            CheckpointEpoch(1),
+            offsets,
+            Some("mapping-v2".into()),
+            12345,
+        );
+
+        let cmd = ClusterControlCommand::RecordCheckpoint(cp);
+        let encoded = encode_command(&cmd).unwrap();
+        let decoded = decode_command(&encoded).unwrap();
+
+        match decoded {
+            ClusterControlCommand::RecordCheckpoint(round) => {
+                assert_eq!(round.checkpoint_id, "cp-001");
+                assert_eq!(round.node_id, NodeId::from("node-a"));
+                assert_eq!(round.epoch, CheckpointEpoch(1));
+                assert_eq!(round.segment_offsets.len(), 2);
+                assert_eq!(
+                    round.segment_offsets.get(&SegmentId::from("seg-1")),
+                    Some(&RecordOffset(1024))
+                );
+                assert_eq!(round.metadata_version, Some("mapping-v2".into()));
+                assert_eq!(round.checksum, 12345);
+            }
+            _ => panic!("expected RecordCheckpoint"),
+        }
     }
 }

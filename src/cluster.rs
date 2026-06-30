@@ -318,6 +318,47 @@ pub struct MetadataOutboxCheckpoint {
     pub epoch: CheckpointEpoch,
 }
 
+/// Shard-level recovery checkpoint replicated through Raft.
+///
+/// Records segment consumption progress so a recovering node can skip
+/// already-processed segment data. The `segment_offsets` map records
+/// (segment_id → last_consumed_offset) for every segment that has been
+/// fully or partially consumed by the time this checkpoint was taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointManifest {
+    pub checkpoint_id: String,
+    pub node_id: NodeId,
+    pub epoch: CheckpointEpoch,
+    pub segment_offsets: BTreeMap<SegmentId, RecordOffset>,
+    pub metadata_version: Option<String>,
+    pub checksum: u64,
+}
+
+impl CheckpointManifest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        checkpoint_id: impl Into<String>,
+        node_id: NodeId,
+        epoch: CheckpointEpoch,
+        segment_offsets: BTreeMap<SegmentId, RecordOffset>,
+        metadata_version: Option<String>,
+        checksum: u64,
+    ) -> Self {
+        Self {
+            checkpoint_id: checkpoint_id.into(),
+            node_id,
+            epoch,
+            segment_offsets,
+            metadata_version,
+            checksum,
+        }
+    }
+
+    pub fn latest_offset_for(&self, segment_id: &SegmentId) -> Option<RecordOffset> {
+        self.segment_offsets.get(segment_id).copied()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cluster control state
 // ---------------------------------------------------------------------------
@@ -337,6 +378,7 @@ pub struct ClusterControlState {
     writer_leases: BTreeMap<IptoInstanceId, WriterLease>,
     outbox_checkpoints: BTreeMap<(DataIndividualShardId, IptoInstanceId), MetadataOutboxCheckpoint>,
     sealed_segments: BTreeMap<SegmentId, SegmentManifest>,
+    checkpoints: BTreeMap<String, CheckpointManifest>,
 }
 
 impl ClusterControlState {
@@ -394,6 +436,19 @@ impl ClusterControlState {
             ClusterControlCommand::RecordSealedSegment(manifest) => {
                 self.sealed_segments
                     .insert(manifest.segment_id.clone(), manifest);
+            }
+            ClusterControlCommand::RecordCheckpoint(checkpoint) => {
+                if let Some(current) = self.checkpoints.get(&checkpoint.checkpoint_id)
+                    && checkpoint.epoch <= current.epoch
+                {
+                    return Err(ClusterControlError::StaleCheckpointManifest {
+                        checkpoint_id: checkpoint.checkpoint_id,
+                        current: current.epoch,
+                        proposed: checkpoint.epoch,
+                    });
+                }
+                self.checkpoints
+                    .insert(checkpoint.checkpoint_id.clone(), checkpoint);
             }
         }
 
@@ -511,6 +566,14 @@ impl ClusterControlState {
     pub fn sealed_segment(&self, segment_id: &SegmentId) -> Option<&SegmentManifest> {
         self.sealed_segments.get(segment_id)
     }
+
+    pub fn checkpoint(&self, checkpoint_id: &str) -> Option<&CheckpointManifest> {
+        self.checkpoints.get(checkpoint_id)
+    }
+
+    pub fn checkpoints(&self) -> &BTreeMap<String, CheckpointManifest> {
+        &self.checkpoints
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +588,7 @@ pub enum ClusterControlCommand {
     GrantWriterLease(WriterLease),
     RecordOutboxCheckpoint(MetadataOutboxCheckpoint),
     RecordSealedSegment(SegmentManifest),
+    RecordCheckpoint(CheckpointManifest),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -561,6 +625,11 @@ pub enum ClusterControlError {
     StaleCheckpointEpoch {
         shard_id: DataIndividualShardId,
         target: IptoInstanceId,
+        current: CheckpointEpoch,
+        proposed: CheckpointEpoch,
+    },
+    StaleCheckpointManifest {
+        checkpoint_id: String,
         current: CheckpointEpoch,
         proposed: CheckpointEpoch,
     },
@@ -632,6 +701,15 @@ impl fmt::Display for ClusterControlError {
                 target.as_str(),
                 current.0,
                 proposed.0
+            ),
+            Self::StaleCheckpointManifest {
+                checkpoint_id,
+                current,
+                proposed,
+            } => write!(
+                f,
+                "stale checkpoint manifest epoch for '{}': current {}, proposed {}",
+                checkpoint_id, current.0, proposed.0
             ),
         }
     }
