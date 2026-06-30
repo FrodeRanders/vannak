@@ -209,6 +209,12 @@ fn run_server(
 }
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter("graft=trace")
+        .with_target(false)
+        .try_init()
+        .ok();
+
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() >= 2 && args[1] == "probe" {
