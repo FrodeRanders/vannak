@@ -7,13 +7,8 @@ COPY vannak/Cargo.toml vannak/Cargo.lock ./
 COPY vannak/src/ src/
 COPY vannak/tests/ tests/
 
-# Dummy ipto crate — path dep must exist for Cargo.toml parsing even when optional
-RUN mkdir -p ../ipto/implementations/rust/src && \
-    echo '[package]' > ../ipto/implementations/rust/Cargo.toml && \
-    echo 'name = "ipto_rust"' >> ../ipto/implementations/rust/Cargo.toml && \
-    echo 'version = "0.1.0"' >> ../ipto/implementations/rust/Cargo.toml && \
-    echo 'edition = "2021"' >> ../ipto/implementations/rust/Cargo.toml && \
-    touch ../ipto/implementations/rust/src/lib.rs
+COPY ipto/implementations/rust/ ../ipto/implementations/rust/
+COPY ipto/shared/ ../ipto/shared/
 
 COPY raft/graft-rust/graft-proto/ ../raft/graft-rust/graft-proto/
 COPY raft/graft-rust/graft-core/ ../raft/graft-rust/graft-core/
