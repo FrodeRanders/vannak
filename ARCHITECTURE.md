@@ -909,6 +909,13 @@ These policies should be typed configuration, not scattered conditionals.
 - Track acknowledged metadata writes. [partly done: segment offsets and
   checkpoint data for acknowledged durable entries]
 - Surface degraded Ipto placement/write status.
+- Add concrete `IptoWriter` adapter against `ipto_rust::RepoService`.
+  [done: `IptoRepoWriter` behind `ipto-writer` feature flag, with
+  deterministic correlation-id generation and idempotent writes via
+  `get_unit_by_corrid_json()`]
+- Add PROV-O SDL schema for provenance attribute/template registration.
+  [done: built-in `PROV_O_SDL` const with core PROV attributes and
+  `ProvEntity` template]
 
 ### Phase 6: Raft Control Plane
 
@@ -947,23 +954,33 @@ metadata.
 
 ## 18. Open Questions
 
+### Resolved
+
+- **Ipto placement-map format**: consistent-hash ring from `IptoPlacementSlot`
+  configuration, with optional range overrides. See `cluster.rs`.
+- **`DataIndividualShardId` assignment**: derived from `DataIndividualId` via
+  deterministic FNV-1a hash (`from_data_individual()`), or caller-assigned for
+  domain-driven placement. The shard ID is stable across reconfiguration.
+- **Segment format**: append-only with `VANNAK01` magic, `(len: u32, checksum:
+  u64, payload)` records. See `storage.rs`.
+- **Minimum Raft state**: placement ring configuration, writer leases, metadata
+  outbox checkpoints, and sealed segment manifests. The ring is built
+  locally — Raft replicates only the compact slot configuration.
+- **Process reducer model**: tolerant state repairer. Absorbs duplicates, applies
+  what it can, maintains activity durations and metadata ref accumulation.
+
+### Still Open
+
 - Should Durga add a native event id, or should Vannak continue deriving one
   from source identity and stream position?
 - Which Ipto identifiers are stable enough to embed directly in events?
 - What is the canonical identity scheme for data individuals?
-- How is `DataIndividualShardId` assigned and kept stable?
-- What is the first Ipto placement-map format?
-  _Resolved: consistent-hash ring from `IptoPlacementSlot` configuration, with
-  optional range overrides. See `cluster.rs`._
 - Which passive metadata fields should be part of the core envelope?
 - Which active metadata operations should be standardized first?
 - How are flowing-data names mapped to Ipto attributes and records?
 - What durability mode is required before acknowledging metadata capture?
 - What ordering guarantees can pipeline event producers provide?
-- Should process reducers be strict state machines or tolerant state repairers?
 - Which state must be durable before an ingest acknowledgment is returned?
-- What is the first segment format?
-- What is the minimum Raft state required for useful clustering?
 - How should metadata version changes reprocess unresolved events?
 - How much historical query should hot indexes support before reading segments?
 

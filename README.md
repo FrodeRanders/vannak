@@ -82,7 +82,12 @@ Implemented so far:
 - segment-offset tracking for acknowledged durable outbox entries, allowing
   checkpoint data to be proposed through the cluster control plane;
 - checkpoint-aware outbox segment replay that skips acknowledged offsets and
-  returns an owned replay summary.
+  returns an owned replay summary;
+- optional `ipto-writer` feature flag with an `IptoWriter` implementation
+  (`IptoRepoWriter`) backed by `ipto_rust::RepoService` (PostgreSQL);
+- deterministic correlation-id (UUID v7) generation from `IdempotencyKey` for
+  idempotent Ipto writes;
+- built-in PROV-O SDL schema for provenance attribute and template registration.
 
 ## Two Event Planes
 
@@ -220,7 +225,10 @@ Current test coverage exercises:
 - process state reduction;
 - metadata impact indexing;
 - duplicate event idempotency;
-- Ipto placement by `DataIndividualShardId`;
+- consistent-hash ring placement with virtual nodes;
+- ring determinism and reconfiguration redistribution;
+- placement map overrides taking priority over the ring;
+- placement history and epoch-based query fallback;
 - metadata mapping into Ipto write payloads;
 - metadata outbox duplicate detection and acknowledgment;
 - segment-backed metadata outbox replay;

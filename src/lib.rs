@@ -28,6 +28,8 @@ pub mod durga;
 pub mod index;
 pub mod ingest;
 pub mod ipto;
+#[cfg(feature = "ipto-writer")]
+pub mod ipto_adapter;
 pub mod metadata;
 pub mod observability;
 pub mod process;

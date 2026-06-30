@@ -25,3 +25,10 @@ name = "vannak"
 path = "src/lib.rs"
 
 [dependencies]
+ipto_rust = { path = "../ipto/implementations/rust", optional = true, default-features = false }
+serde_json = { version = "1", optional = true }
+uuid = { version = "1", features = ["v7"], optional = true }
+
+[features]
+default = []
+ipto-writer = ["dep:ipto_rust", "dep:serde_json", "dep:uuid"]
