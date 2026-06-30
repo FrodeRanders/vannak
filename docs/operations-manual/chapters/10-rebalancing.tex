@@ -1,0 +1,106 @@
+\section{Rebalancing}
+\label{sec:rebalancing}
+
+Rebalancing moves the durable metadata for a shard range from one \ipto{}
+instance to another after a placement change. \vannak{} provides the building
+blocks for this, while the surrounding automation remains future work.
+
+\subsection{Motivation}
+
+When the placement map changes, a data individual's new writes go to its new
+owner, but its older durable metadata still lives on the previous owner. Two
+mechanisms cover this gap: a read-time fallback that is available immediately,
+and an explicit replay that physically moves the data.
+
+\subsection{Query Fallback Approach}
+
+The first line of defense is query fallback. Because
+\texttt{ClusterControlState} keeps a bounded history of placement maps,
+\texttt{resolve\_with\_fallback} returns the current owner first and then prior
+owners. A reader therefore finds metadata written before a reconfiguration
+without any physical movement, as long as the change is within the five-epoch
+history window (Section~\ref{sec:topology}).
+
+\begin{vnote}
+Query fallback is sufficient for short-lived reconfigurations. It does not move
+data, so it cannot replace explicit rebalancing for long-lived data or for
+permanently retiring an \ipto{} instance.
+\end{vnote}
+
+\subsection{Shard-Aware Payload}
+
+Physical rebalancing is possible because every \texttt{IptoWritePayload} records
+its \texttt{shard\_id}. The encoded payload in an outbox segment therefore
+carries enough information to select exactly the records belonging to a shard
+range, without consulting any external index.
+
+\subsection{Shard-Range Replay}
+
+\texttt{replay\_metadata\_outbox\_segment\_for\_shard\_range} scans a segment and
+returns an outbox containing only the pending entries whose \texttt{shard\_id}
+falls within an inclusive range.
+
+\begin{lstlisting}
+pub fn replay_metadata_outbox_segment_for_shard_range(
+    path: impl AsRef<Path>,
+    start: DataIndividualShardId,
+    end: DataIndividualShardId,
+) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
+    let mut reader = SegmentReader::open(path)?;
+    let mut outbox = MetadataOutbox::new();
+    while let Some(record) = reader.read_next()? {
+        let payload = IptoWritePayload::decode(&record.payload)?;
+        if payload.shard_id >= start && payload.shard_id <= end {
+            outbox.enqueue_with_offset(payload, Some(record.offset));
+        }
+    }
+    Ok(outbox)
+}
+\end{lstlisting}
+
+\subsection{rebalance\_shard\_range\_to()}
+
+\texttt{rebalance\_shard\_range\_to} ties replay and delivery together. It
+replays the shard range from a segment, then drains the resulting pending
+entries through a writer connected to the new \ipto{} target. Because delivery
+goes through the idempotent writer, partially completed rebalances are safe to
+re-run.
+
+\begin{lstlisting}
+pub fn rebalance_shard_range_to(
+    segment_path: impl AsRef<Path>,
+    start: DataIndividualShardId,
+    end: DataIndividualShardId,
+    writer: &mut impl IptoWriter,
+    max_attempts: usize,
+) -> Result<MetadataOutboxRebalanceSummary, MetadataOutboxStorageError>
+\end{lstlisting}
+
+The returned \texttt{MetadataOutboxRebalanceSummary} reports
+\texttt{entries\_found}, \texttt{attempted}, \texttt{acknowledged}, and
+\texttt{failed}. The integration test \texttt{rebalancing\_delivers\_shard\_range\_to\_new\_target}
+writes two payloads with different shard ids and confirms that rebalancing one
+shard range delivers only the matching entry.
+
+\subsection{When to Rebalance}
+
+Use explicit rebalancing rather than query fallback when:
+
+\begin{itemize}
+\item an \ipto{} instance is being permanently retired;
+\item the placement change is older than the five-epoch fallback window;
+\item read latency from fanning out across prior owners is unacceptable;
+\item compliance requires data to physically reside on its new owner.
+\end{itemize}
+
+\subsection{Not Yet Implemented}
+
+The primitives above exist and are tested, but the surrounding orchestration is
+not yet built. There is currently no automatic trigger that detects a placement
+change and schedules rebalancing, no progress checkpoint specific to a
+rebalance, and no coordinated cut-over that fences the old target. Operators
+invoke \texttt{rebalance\_shard\_range\_to} explicitly; placement-driven,
+checkpointed, cluster-coordinated rebalancing is planned future work that builds
+on writer leases and outbox checkpoints.
+
+\endinput

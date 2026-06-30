@@ -1,0 +1,188 @@
+\section{Configuration}
+\label{sec:configuration}
+
+This section covers the runtime configuration surfaces: the \raft{} cluster
+Compose file and DNS discovery, the \ipto{} backend environment variables, the
+PROV-O SDL schema, attribute mapping, and the \raft{}-side control parameters.
+
+\subsection{Raft Cluster Configuration}
+
+The three-node cluster is configured entirely through
+\filepath{docker-compose.cluster.yml} and the CoreDNS zone. Each node is given a
+static address on the \texttt{10.77.0.0/24} bridge network and a command line of
+the form:
+
+\begin{lstlisting}[numbers=none]
+--srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-1 /data
+\end{lstlisting}
+
+The arguments are the SRV service name to resolve, the bind host, the listen
+port, the node id, and the data directory. The Compose file points each node's
+DNS resolver at the CoreDNS container (\texttt{10.77.0.10}).
+
+\subsection{Static IP Addresses}
+
+Static addressing makes the DNS zone deterministic and avoids relying on Docker
+DNS for the SRV records.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Host & Address \\
+\hline
+\texttt{ns.vannak.local} & \texttt{10.77.0.10} \\
+\texttt{vannak-1.vannak.local} & \texttt{10.77.0.11} \\
+\texttt{vannak-2.vannak.local} & \texttt{10.77.0.12} \\
+\texttt{vannak-3.vannak.local} & \texttt{10.77.0.13} \\
+\hline
+\end{tabular}
+\caption{Static address assignments in the cluster zone.}
+\end{table}
+
+\subsection{CoreDNS SRV Records}
+
+CoreDNS serves the \texttt{vannak.local} zone from \filepath{dns/vannak.local.db}
+and forwards everything else upstream. The Corefile declares both zones:
+
+\begin{lstlisting}[numbers=none]
+vannak.local:53 {
+    file /vannak.local.db
+    log
+    errors
+}
+
+.:53 {
+    forward . 1.1.1.1 8.8.8.8
+    log
+    errors
+}
+\end{lstlisting}
+
+The zone file publishes one A-record per node and three SRV records under
+\texttt{\_vannak.\_tcp}:
+
+\begin{lstlisting}[numbers=none]
+_vannak._tcp IN SRV 10 10 10081 vannak-1.vannak.local.
+_vannak._tcp IN SRV 10 10 10081 vannak-2.vannak.local.
+_vannak._tcp IN SRV 10 10 10081 vannak-3.vannak.local.
+\end{lstlisting}
+
+\subsection{DNS Auto-Discovery}
+
+At startup, \texttt{vannak-node} resolves its SRV service by shelling out to
+\shellcmd{dig +short SRV _vannak._tcp.vannak.local}. Each returned record yields
+a peer specification of the form \texttt{peer-id@hostname:port}, where the peer
+id is the first DNS label of the hostname. If no peers resolve, the node logs a
+warning and starts as a single node.
+
+\subsection{Port 10081}
+
+All cluster nodes listen on TCP port 10081 for the \graft{} transport. The same
+port is used for the \texttt{probe} subcommand. The Dockerfile declares
+\shellcmd{EXPOSE 10081}.
+
+\subsection{Ipto Backend Environment Variables}
+
+The \texttt{ipto-writer} feature connects to PostgreSQL through
+\texttt{ipto\_rust}'s \texttt{PostgresBackend}, which reads \texttt{IPTO\_PG\_*}
+environment variables with sensible local defaults.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Variable & Default \\
+\hline
+\texttt{IPTO\_PG\_HOST} & \texttt{localhost} \\
+\texttt{IPTO\_PG\_PORT} & \texttt{5432} \\
+\texttt{IPTO\_PG\_USER} & \texttt{repo} \\
+\texttt{IPTO\_PG\_PASSWORD} & \texttt{repo} \\
+\texttt{IPTO\_PG\_DATABASE} & \texttt{repo} \\
+\hline
+\end{tabular}
+\caption{\ipto{} PostgreSQL backend environment variables.}
+\end{table}
+
+These defaults match the credentials set by \filepath{docker-compose.test.yml},
+so the integration test connects with no extra configuration.
+
+\subsection{The PROV-O SDL Schema}
+
+\texttt{IptoRepoWriter} ships a built-in SDL schema, the constant
+\texttt{PROV\_O\_SDL}, declaring the provenance attribute registry and a
+\texttt{ProvEntity} unit template. It registers a datatype registry (string,
+time, integer, long, double, boolean), the core PROV-O properties, RDFS label
+and comment, and \vannak{}-specific attributes such as
+\texttt{vannak:dataIndividualId} and \texttt{vannak:processInstanceId}. The
+schema is persisted by calling \texttt{configure\_sdl()} once at startup.
+
+\subsection{Attribute Mapping}
+
+An \texttt{IptoMapping} declares a version string and a set of mappings from
+\texttt{MetadataFieldName} to \texttt{IptoAttributeName}. Only mapped fields are
+written; unmapped passive or active fields are ignored when building the
+payload.
+
+\begin{lstlisting}
+let mapping = IptoMapping::new("v1")
+    .map_field("metadata.source_system", "attr:provenance.source_system")
+    .map_field("mask.customer.email", "attr:provenance.masked_field");
+\end{lstlisting}
+
+\subsection{Raft Parameters}
+
+The \texttt{vannak-node} binary constructs a \texttt{RaftNode} with the
+discovered membership and a fixed set of tuning arguments (an election tick
+base, a snapshot/log threshold, and a maximum batch size). These are passed
+positionally to \texttt{RaftNode::new}; adjust them in the binary if cluster
+timing must change.
+
+\subsection{Cluster Membership}
+
+Membership is built from the discovered peers as a stable
+\texttt{ClusterConfiguration}. Each peer becomes a voter. Within the running
+control state, membership is mutated through the
+\texttt{ClusterControlCommand::AddNode} and \texttt{RemoveNode} commands.
+Removing a node also drops any writer leases it held.
+
+\subsection{Writer Leases}
+
+A \texttt{WriterLease} grants a node exclusive write authority for an \ipto{}
+target. A lease records the \texttt{target}, the \texttt{holder} node, and a
+\texttt{LeaseEpoch}. The control state rejects a grant whose holder is not a
+known node (\texttt{UnknownLeaseHolder}) and rejects a stale or equal epoch
+(\texttt{StaleLeaseEpoch}).
+
+\subsection{Checkpoints}
+
+Two checkpoint records are configured through the control plane: the
+\texttt{MetadataOutboxCheckpoint} records the last acknowledged offset for a
+(shard, target) pair, and the \texttt{CheckpointManifest} records per-segment
+consumption progress for recovery. Both reject stale epochs. Checkpoints are
+covered in detail in Section~\ref{sec:recovery}.
+
+\subsection{Environment Variable Summary}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Variable & Used by \\
+\hline
+\texttt{IPTO\_PG\_HOST} & \ipto{} writer backend \\
+\texttt{IPTO\_PG\_PORT} & \ipto{} writer backend \\
+\texttt{IPTO\_PG\_USER} & \ipto{} writer backend \\
+\texttt{IPTO\_PG\_PASSWORD} & \ipto{} writer backend \\
+\texttt{IPTO\_PG\_DATABASE} & \ipto{} writer backend \\
+\texttt{VANNAK\_PG\_INTEGRATION} & enables the integration test \\
+\texttt{VANNAK\_PG\_PORT} & host port for the test PostgreSQL \\
+\texttt{POSTGRES\_USER} & test PostgreSQL container \\
+\texttt{POSTGRES\_PASSWORD} & test PostgreSQL container \\
+\texttt{POSTGRES\_DB} & test PostgreSQL container \\
+\hline
+\end{tabular}
+\caption{Environment variables recognized across \vannak{}.}
+\end{table}
+
+\endinput

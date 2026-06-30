@@ -1,0 +1,278 @@
+\section{Appendix}
+\label{sec:appendix}
+
+This appendix collects reference material: the command-line interface,
+environment variables, infrastructure files, the wire and storage formats, the
+repository layout, and a glossary.
+
+\subsection{CLI Reference}
+
+The \texttt{vannak-node} binary (built with the \texttt{node} feature) accepts
+the following forms:
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Command & Purpose \\
+\hline
+\shellcmd{vannak-node <host> <port> <peer-id> <data-dir> [peers...]} & start with an explicit peer list \\
+\shellcmd{vannak-node --srv <service> <host> <port> <peer-id> <data-dir>} & start with DNS SRV discovery \\
+\shellcmd{vannak-node probe <host> <port>} & probe a node for a cluster summary \\
+\hline
+\end{tabular}
+\caption{\texttt{vannak-node} command forms.}
+\end{table}
+
+A peer specification has the form \texttt{peer-id@host:port}. The default port
+when parsing fails is 10081.
+
+\subsection{Environment Variables}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Variable & Meaning \\
+\hline
+\texttt{IPTO\_PG\_HOST} & \ipto{} PostgreSQL host (default \texttt{localhost}) \\
+\texttt{IPTO\_PG\_PORT} & \ipto{} PostgreSQL port (default \texttt{5432}) \\
+\texttt{IPTO\_PG\_USER} & \ipto{} PostgreSQL user (default \texttt{repo}) \\
+\texttt{IPTO\_PG\_PASSWORD} & \ipto{} PostgreSQL password (default \texttt{repo}) \\
+\texttt{IPTO\_PG\_DATABASE} & \ipto{} PostgreSQL database (default \texttt{repo}) \\
+\texttt{VANNAK\_PG\_INTEGRATION} & set to \texttt{1} to enable the integration test \\
+\texttt{VANNAK\_PG\_PORT} & host port mapping for the test PostgreSQL \\
+\texttt{POSTGRES\_USER} & test PostgreSQL role (\texttt{repo}) \\
+\texttt{POSTGRES\_PASSWORD} & test PostgreSQL password (\texttt{repo}) \\
+\texttt{POSTGRES\_DB} & test PostgreSQL database (\texttt{repo}) \\
+\hline
+\end{tabular}
+\caption{All recognized environment variables.}
+\end{table}
+
+\subsection{Docker Compose Reference}
+
+\begin{description}
+\item[\filepath{docker-compose.test.yml}] PostgreSQL 16 with the \ipto{} schema,
+  procedures, and boot data mounted into \filepath{/docker-entrypoint-initdb.d};
+  used by the integration test.
+\item[\filepath{docker-compose.cluster.yml}] CoreDNS plus three
+  \texttt{vannak-node} containers on the \texttt{10.77.0.0/24} network, each
+  listening on port 10081 with DNS SRV discovery.
+\end{description}
+
+\subsection{DNS Zone File}
+
+The zone served by CoreDNS from \filepath{dns/vannak.local.db}:
+
+\begin{lstlisting}[numbers=none]
+$ORIGIN vannak.local.
+$TTL 5
+@       IN SOA  ns.vannak.local. hostmaster.vannak.local. (2026060601 5 5 60 5)
+        IN NS   ns.vannak.local.
+
+ns      IN A    10.77.0.10
+
+vannak-1 IN A    10.77.0.11
+vannak-2 IN A    10.77.0.12
+vannak-3 IN A    10.77.0.13
+
+_vannak._tcp IN SRV 10 10 10081 vannak-1.vannak.local.
+_vannak._tcp IN SRV 10 10 10081 vannak-2.vannak.local.
+_vannak._tcp IN SRV 10 10 10081 vannak-3.vannak.local.
+\end{lstlisting}
+
+\subsection{Port Assignments}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Port & Use \\
+\hline
+\texttt{10081} & \raft{} transport and \texttt{probe} (all nodes) \\
+\texttt{53} & CoreDNS (container-internal) \\
+\texttt{5432} & PostgreSQL (test backend) \\
+\hline
+\end{tabular}
+\caption{Port assignments.}
+\end{table}
+
+\subsection{Ipto SQL Schema}
+
+The integration backend loads three external SQL files from
+\filepath{../ipto/shared/db/postgresql}: \filepath{schema.sql} (tables),
+\filepath{procedures.sql} (stored procedures), and \filepath{boot.sql} (boot
+data). \vannak{} treats these as the authoritative \ipto{} schema and does not
+redefine them. The relevant facts for \vannak{} are that boot data seeds tenant
+id 1 (\texttt{SCRATCH}), and that provenance is stored as units carrying a
+\texttt{tenantid}, a \texttt{corrid}, a status (30 = EFFECTIVE), and a list of
+attributes.
+
+\subsection{PROV-O SDL Full Text}
+
+The \texttt{PROV\_O\_SDL} constant configured by \texttt{configure\_sdl()}:
+
+\begin{lstlisting}
+enum DataTypes @datatypeRegistry {
+    STRING  @datatype(id: 1)
+    TIME    @datatype(id: 2)
+    INTEGER @datatype(id: 3)
+    LONG    @datatype(id: 4)
+    DOUBLE  @datatype(id: 5)
+    BOOLEAN @datatype(id: 6)
+}
+
+enum Attributes @attributeRegistry {
+    prov_generatedAtTime   @attribute(datatype: TIME,   array: false, name: "prov:generatedAtTime",   uri: "http://www.w3.org/ns/prov#generatedAtTime")
+    prov_startedAtTime     @attribute(datatype: TIME,   array: false, name: "prov:startedAtTime",     uri: "http://www.w3.org/ns/prov#startedAtTime")
+    prov_endedAtTime       @attribute(datatype: TIME,   array: false, name: "prov:endedAtTime",       uri: "http://www.w3.org/ns/prov#endedAtTime")
+    prov_invalidatedAtTime @attribute(datatype: TIME,   array: false, name: "prov:invalidatedAtTime", uri: "http://www.w3.org/ns/prov#invalidatedAtTime")
+    prov_wasAttributedTo   @attribute(datatype: STRING, array: false, name: "prov:wasAttributedTo",   uri: "http://www.w3.org/ns/prov#wasAttributedTo")
+    prov_value             @attribute(datatype: STRING, array: false, name: "prov:value",             uri: "http://www.w3.org/ns/prov#value")
+    prov_location          @attribute(datatype: STRING, array: false, name: "prov:location",          uri: "http://www.w3.org/ns/prov#location")
+    prov_type              @attribute(datatype: STRING, array: false, name: "prov:type",              uri: "http://www.w3.org/ns/prov#type")
+
+    rdfs_label             @attribute(datatype: STRING, array: false, name: "rdfs:label",             uri: "http://www.w3.org/2000/01/rdf-schema#label")
+    rdfs_comment           @attribute(datatype: STRING, array: false, name: "rdfs:comment",           uri: "http://www.w3.org/2000/01/rdf-schema#comment")
+
+    vannak_data_individual @attribute(datatype: STRING, array: false, name: "vannak:dataIndividualId")
+    vannak_process_instance @attribute(datatype: STRING, array: false, name: "vannak:processInstanceId")
+    vannak_activity_id     @attribute(datatype: STRING, array: false, name: "vannak:activityId")
+    vannak_pipeline_id     @attribute(datatype: STRING, array: false, name: "vannak:pipelineId")
+    vannak_tenant_id       @attribute(datatype: STRING, array: false, name: "vannak:tenantId")
+    vannak_environment_id  @attribute(datatype: STRING, array: false, name: "vannak:environmentId")
+}
+
+type ProvEntity @template(name: "ProvEntity") {
+    label:             String @use(attribute: rdfs_label)
+    comment:           String @use(attribute: rdfs_comment)
+    generatedAtTime:   String @use(attribute: prov_generatedAtTime)
+    invalidatedAtTime: String @use(attribute: prov_invalidatedAtTime)
+    wasAttributedTo:   String @use(attribute: prov_wasAttributedTo)
+    value:             String @use(attribute: prov_value)
+    location:          String @use(attribute: prov_location)
+    type:              String @use(attribute: prov_type)
+    dataIndividualId:  String @use(attribute: vannak_data_individual)
+}
+\end{lstlisting}
+
+\subsection{Integration Test Runbook}
+
+\begin{enumerate}
+\item Start PostgreSQL:
+  \shellcmd{docker compose -f docker-compose.test.yml up -d}.
+\item Run the test:
+  \shellcmd{VANNAK_PG_INTEGRATION=1 cargo test --features ipto-writer --test vannak_integration -- --nocapture}.
+\item Tear down:
+  \shellcmd{docker compose -f docker-compose.test.yml down -v}.
+\item Or run everything via
+  \shellcmd{./scripts/run-integration-test.sh} (add \shellcmd{--cluster} for the
+  \raft{} cluster).
+\end{enumerate}
+
+The test exercises the full ingest, index, outbox, and \ipto{} writer flow plus
+a shard-range rebalance.
+
+\subsection{Cargo Commands}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Command & Purpose \\
+\hline
+\shellcmd{cargo build} & build the dependency-free core \\
+\shellcmd{cargo test} & run all unit tests \\
+\shellcmd{cargo fmt --check} & verify formatting \\
+\shellcmd{cargo clippy --all-targets -- -D warnings} & lint with warnings as errors \\
+\shellcmd{cargo build --features ipto-writer} & build with the \ipto{} writer \\
+\shellcmd{cargo build --features node --bin vannak-node} & build the node binary \\
+\hline
+\end{tabular}
+\caption{Common Cargo commands.}
+\end{table}
+
+\subsection{Codec Reference}
+
+\texttt{IptoWritePayload::encode} produces a small, stable, little-endian binary
+format used for outbox segment records. Strings are length-prefixed
+(\texttt{u32} length followed by UTF-8 bytes).
+
+\begin{lstlisting}[numbers=none]
+target:           string
+shard_id:         u64
+idempotency_key:  string
+mapping_version:  string
+attribute_count:  u32
+repeated attribute_count times:
+  attribute_name: string
+  value:          tag(u8) + value-body
+\end{lstlisting}
+
+Value tags: \texttt{0} String (string), \texttt{1} Integer (\texttt{i64}),
+\texttt{2} Boolean (\texttt{u8}), \texttt{3} Timestamp (string), \texttt{4}
+StringList (\texttt{u32} count followed by that many strings). Decoding rejects
+trailing bytes, unexpected end of input, invalid UTF-8, and unknown value tags.
+
+\subsection{Segment Format}
+
+\begin{lstlisting}[numbers=none]
+magic[8]                  // "VANNAK01"
+repeated:
+  len: u32 little endian
+  checksum: u64 little endian
+  payload: [u8; len]
+\end{lstlisting}
+
+The per-record checksum is an FNV-1a derivative over the payload; the rolling
+segment checksum combines records with a rotate-and-xor step.
+
+\subsection{Repository Layout}
+
+\begin{lstlisting}[numbers=none]
+src/
+  ingest.rs         process event envelope and validation
+  process.rs        process model and state reducer
+  data.rs           data-individual provenance model
+  metadata.rs       typed metadata references
+  durga.rs          Durga monitor compatibility types
+  index.rs          dependency-free hot index
+  query.rs          query request/result types
+  ipto.rs           placement, mapping, payload, outbox model
+  ipto_adapter.rs   Ipto writer backed by ipto_rust (feature: ipto-writer)
+  storage.rs        append-only segment writer/reader
+  cluster.rs        Raft-facing control state and placement
+  raft_sm.rs        graft state machine adapter (feature: raft)
+  observability.rs  owned snapshot types
+  runtime.rs        Sitas integration boundary
+  bin/vannak-node.rs  Raft node binary (feature: node)
+docs/
+  ARCHITECTURE.md   detailed architecture notes
+\end{lstlisting}
+
+\subsection{Glossary}
+
+\begin{description}
+\item[Process event] a \durga{} lifecycle event, ingested as a
+  \texttt{PipelineEvent}.
+\item[Data individual] a single flowing data item with a stable
+  \texttt{DataIndividualId}.
+\item[Passive metadata] facts observed at receive/create boundaries.
+\item[Active metadata] facts produced by processing (transform, mask, validate,
+  enrich).
+\item[\texttt{DataIndividualShardId}] domain placement key selecting an \ipto{}
+  instance; not a \sitas{} executor shard.
+\item[Placement map] an epoch-versioned ring plus overrides, replicated through
+  \raft{}.
+\item[Outbox] the durable, replayable queue of pending \ipto{} writes.
+\item[Segment] an append-only, checksummed durability file with the
+  \texttt{VANNAK01} magic.
+\item[Checkpoint] a replicated record of consumption progress for recovery.
+\item[Writer lease] single-writer authority for an \ipto{} target, fenced by a
+  \texttt{LeaseEpoch}.
+\item[Hot path] the shard-local ingest and indexing path.
+\item[Agreement path] the \raft{}-coordinated control path.
+\end{description}
+
+\endinput

@@ -1,0 +1,193 @@
+\section{System Overview}
+\label{sec:system-overview}
+
+This section describes \vannak{}'s architecture, component inventory, the two
+event planes in detail, the end-to-end data flow, and the separation between
+the hot path and the agreement path.
+
+\subsection{Architecture}
+
+\vannak{} ingests two related event streams, keeps recent operational state in
+memory, writes raw history and metadata outbox entries to append-only segments,
+delivers durable metadata to \ipto{}, and reserves \raft{} for cluster
+coordination.
+
+\begin{lstlisting}[numbers=none]
+Durga pipeline runtimes
+    -> typed process events + data-individual metadata events
+    -> Vannak ingest API
+    -> Sitas shard-local hot indexes
+    -> metadata correlation and Ipto placement
+    -> durable metadata outbox
+    -> Ipto PostgreSQL instance selected by DataIndividualShardId
+    -> query API / snapshots / alerting
+    -> append-only event segments
+    -> Raft-backed cluster control state
+\end{lstlisting}
+
+\subsection{Component Inventory}
+
+\begin{description}
+\item[Ingest] validates \texttt{PipelineEvent} values and rejects empty
+  required fields.
+\item[Hot index] \texttt{HotIndex} reduces process events into current
+  per-instance state and builds metadata-impact indexes.
+\item[Placement] \texttt{IptoPlacementMap} resolves a
+  \texttt{DataIndividualShardId} to an \texttt{IptoInstanceId}.
+\item[Mapping] \texttt{IptoMapping} translates metadata field names to \ipto{}
+  attribute names.
+\item[Outbox] \texttt{MetadataOutbox} and \texttt{SegmentBackedMetadataOutbox}
+  hold pending durable writes.
+\item[Writer] the \texttt{IptoWriter} trait and \texttt{IptoRepoWriter}
+  deliver payloads idempotently into \ipto{}.
+\item[Storage] \texttt{SegmentWriter} / \texttt{SegmentReader} provide
+  append-only durability.
+\item[Cluster] \texttt{ClusterControlState} holds compact \raft{}-replicable
+  control state.
+\end{description}
+
+\subsection{Two Event Planes}
+
+\subsubsection{Process Events}
+
+The \texttt{PipelineEvent} type is the validated process event accepted by the
+hot path. Each event carries a coarse \texttt{EventStatus} and a precise
+\texttt{EventKind}.
+
+\texttt{EventStatus} variants: \texttt{Started}, \texttt{Completed},
+\texttt{Failed}, \texttt{Escalated}, \texttt{Cancelled}.
+
+\texttt{EventKind} variants: \texttt{ProcessStarted}, \texttt{ActivityEntered},
+\texttt{ActivityCompleted}, \texttt{ActivityEscalated},
+\texttt{ActivityCancelled}, \texttt{GatewayTaken}, \texttt{ProcessCompleted},
+\texttt{ProcessFailed}. Each kind has an \texttt{inferred\_status()} mapping to
+an \texttt{EventStatus}.
+
+\begin{lstlisting}
+pub struct PipelineEvent {
+    event_id: EventId,
+    source_id: SourceId,
+    source_sequence: SourceSequence,
+    tenant_id: TenantId,
+    environment_id: EnvironmentId,
+    pipeline_id: PipelineId,
+    process_definition_id: ProcessDefinitionId,
+    process_instance_id: ProcessInstanceId,
+    process_version: Option<ProcessVersion>,
+    activity_id: Option<ActivityId>,
+    token_id: Option<TokenId>,
+    correlation_id: Option<CorrelationId>,
+    business_key: Option<BusinessKey>,
+    timestamp: EventTimestamp,
+    status: EventStatus,
+    kind: EventKind,
+    error: Option<ErrorInfo>,
+    metadata_refs: Vec<MetadataRef>,
+    metadata_version: Option<MetadataVersion>,
+    causal_parent: Option<EventId>,
+    payload: Option<String>,
+}
+\end{lstlisting}
+
+\subsubsection{Data-Individual Metadata Events}
+
+The \texttt{DataIndividualMetadataEvent} type is a provenance fact for one
+flowing data item. It distinguishes \texttt{PassiveMetadata} (observed at
+receive/create boundaries) from \texttt{ActiveMetadata} (produced by
+transformations, masking, validation, enrichment). Both are maps of
+\texttt{MetadataFieldName} to \texttt{MetadataValue}.
+
+\texttt{MetadataValue} variants: \texttt{String}, \texttt{Integer},
+\texttt{Boolean}, \texttt{Timestamp}, \texttt{StringList}.
+
+The \texttt{MetadataOperation} enum classifies the provenance operation:
+
+\begin{lstlisting}
+pub enum MetadataOperation {
+    Created,
+    Received,
+    Transformed { plugin_name: Option<PluginName>,
+                  plugin_version: Option<PluginVersion> },
+    Masked { fields: Vec<String> },
+    Validated { passed: bool },
+    Enriched { source: Option<String> },
+    Routed,
+    Persisted,
+}
+\end{lstlisting}
+
+Each event carries a \texttt{DataIndividualShardId} (the domain placement key)
+and an \texttt{IdempotencyKey} derived from the data-individual id and the
+metadata-event id.
+
+\subsection{Data Flow}
+
+The full path of a captured metadata event is:
+
+\begin{enumerate}
+\item \textbf{Ingest} a process event or metadata event at the typed API.
+\item \textbf{Validate} required fields via \texttt{PipelineEvent::validate}.
+\item \textbf{Route} the event to the owning \sitas{} shard.
+\item \textbf{Hot index} reduces process state and indexes metadata impact.
+\item \textbf{Metadata event} carries passive and active metadata.
+\item \textbf{Resolve shard} maps \texttt{DataIndividualShardId} to an
+  \texttt{IptoInstanceId} through the placement map.
+\item \textbf{Map attributes} translates fields to \ipto{} attributes via
+  \texttt{IptoWritePayload::from\_event}.
+\item \textbf{Outbox} persists the encoded payload to a segment before it is
+  visible as pending.
+\item \textbf{IptoWriter} delivers the payload idempotently.
+\item \textbf{\ipto{}} stores the durable provenance unit.
+\end{enumerate}
+
+\subsection{Hot Path versus Agreement Path}
+
+The hot path is shard-local and append-only:
+
+\begin{lstlisting}[numbers=none]
+event -> validate -> route -> shard-local reducer/index -> segment writer
+\end{lstlisting}
+
+The agreement path uses \raft{} only for decisions that must be agreed across
+the cluster:
+
+\begin{lstlisting}[numbers=none]
+ownership decision  -> Raft log -> committed cluster state
+checkpoint decision -> Raft log -> committed manifest
+sealed segment      -> Raft log -> committed segment manifest index
+\end{lstlisting}
+
+\begin{vnote}
+High-volume event ingest must never be routed through \raft{}. Consensus is
+reserved for membership, ownership, placement maps, metadata-version
+activation, checkpoint manifests, sealed-segment manifests, and writer leases.
+\end{vnote}
+
+\subsection{Feature Flag Matrix}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lll}
+\hline
+Capability & Required feature & Key types \\
+\hline
+Core domain & (none) & \texttt{HotIndex}, \texttt{MetadataOutbox} \\
+\ipto{} writes & \texttt{ipto-writer} & \texttt{IptoRepoWriter} \\
+State machine & \texttt{raft} & \texttt{ClusterStateMachine} \\
+Node binary & \texttt{node} & \texttt{vannak-node} \\
+\hline
+\end{tabular}
+\caption{Capabilities enabled by each feature flag.}
+\end{table}
+
+\subsection{Crate Layout}
+
+The crate root re-exports the public types of every module. The dependency-free
+modules (\texttt{ingest}, \texttt{process}, \texttt{data}, \texttt{metadata},
+\texttt{durga}, \texttt{index}, \texttt{query}, \texttt{ipto},
+\texttt{storage}, \texttt{cluster}, \texttt{observability}, \texttt{runtime})
+compile with no external crates. The \texttt{ipto\_adapter} and
+\texttt{raft\_sm} modules are compiled only when their feature flags are
+enabled.
+
+\endinput

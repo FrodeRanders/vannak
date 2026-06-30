@@ -1,0 +1,128 @@
+\section{Observability}
+\label{sec:observability}
+
+\vannak{} exposes observability as owned, point-in-time snapshots rather than
+borrowed views into live state. This keeps reads cheap, non-blocking, and safe
+to move across shard boundaries.
+
+\subsection{Snapshot Types}
+
+\subsubsection{HotIndexSnapshot}
+
+\texttt{HotIndexSnapshot} summarizes a shard-local index with counts only: the
+number of process instances, events, pipelines, and distinct metadata
+references, plus the running \texttt{duplicate\_events} and
+\texttt{rejected\_events} counters.
+
+\subsubsection{MetadataOutboxSnapshot}
+
+\texttt{MetadataOutboxSnapshot} reports the outbox queue health.
+
+\begin{lstlisting}
+pub struct MetadataOutboxSnapshot {
+    pub total: usize,
+    pub pending: usize,
+    pub acknowledged: usize,
+    pub failed: usize,
+    pub queued_pending: usize,
+}
+\end{lstlisting}
+
+The \texttt{failed} count is the primary alerting signal: a sustained nonzero
+value means deliveries are not reaching \ipto{}. The gap between \texttt{pending}
+and \texttt{queued\_pending} reflects entries that have been dequeued but not yet
+resolved.
+
+\subsubsection{SegmentBackedMetadataOutboxSnapshot}
+
+\texttt{SegmentBackedMetadataOutboxSnapshot} pairs the outbox snapshot with the
+current \texttt{SegmentManifest}, so a single read shows both the in-memory
+delivery state and the durable backing segment.
+
+\begin{lstlisting}
+pub struct SegmentBackedMetadataOutboxSnapshot {
+    pub outbox: MetadataOutboxSnapshot,
+    pub segment: SegmentManifest,
+}
+\end{lstlisting}
+
+\subsection{Segment Manifest}
+
+A \texttt{SegmentManifest} is itself an observability surface: it reports the
+segment id, owning node, path, \texttt{record\_count}, \texttt{byte\_len}, and
+rolling \texttt{checksum}. Comparing record counts and checksums across nodes is
+how operators confirm a sealed segment is intact and replicated.
+
+\subsection{Replay Summary}
+
+After a restart, \texttt{MetadataOutboxReplaySummary} reports what replay did:
+the \texttt{checkpoint\_offset} used, \texttt{scanned\_records},
+\texttt{skipped\_records} (already acknowledged), and \texttt{replayed\_records}
+(re-queued as pending). A large skipped count confirms the checkpoint is being
+honored.
+
+\subsection{Rebalance Summary}
+
+\texttt{MetadataOutboxRebalanceSummary} reports a shard-range rebalance:
+\texttt{entries\_found}, \texttt{attempted}, \texttt{acknowledged}, and
+\texttt{failed}. The related \texttt{MetadataOutboxDrainSummary} reports a drain
+attempt, including the \texttt{stopped\_after\_failure} flag.
+
+\subsection{Query Types}
+
+The query results from Section~\ref{sec:ingest} double as observability outputs.
+\texttt{QueryResult::ProcessInstances} returns owned process snapshots, and
+\texttt{QueryResult::Events} returns owned \texttt{PipelineEvent} values for a
+process instance or for a metadata-impact lookup.
+
+\subsection{Process Instance Snapshot}
+
+\texttt{ProcessInstanceSnapshot} is the owned per-instance view returned by
+queries. It includes the full identity (tenant, environment, pipeline,
+definition, instance, version), the current activity and \texttt{ProcessStatus},
+start and completion timestamps, correlation and business keys, the per-activity
+\texttt{ActivityState} map, per-activity durations, accumulated metadata
+references, the \texttt{retry\_count}, and the last error.
+
+\begin{vnote}
+Activity durations are computed in milliseconds from the recorded entry time to
+the terminal event time. They are derived during reduction, so reading them from
+a snapshot involves no recomputation.
+\end{vnote}
+
+\subsection{Probe Command}
+
+\texttt{vannak-node probe <host> <port>} opens a connection to a node, sends a
+\texttt{ClusterSummaryRequest} envelope, and prints the response payload. It is
+the simplest liveness and cluster-view check for a running node.
+
+\begin{lstlisting}[numbers=none]
+vannak-node probe localhost 10081
+\end{lstlisting}
+
+\subsection{Health Endpoints}
+
+The node exposes its \graft{} transport on port 10081, which serves as the
+reachability endpoint probed above. There is no separate HTTP health port; the
+transport listener and the \texttt{probe} subcommand together provide the
+liveness and summary signals.
+
+\subsection{Container Health Checks}
+
+The test PostgreSQL container defines an explicit health check so dependent
+steps can wait for readiness:
+
+\begin{lstlisting}[numbers=none]
+healthcheck:
+  test: ["CMD-SHELL", "pg_isready -U repo -d repo"]
+  interval: 2s
+  timeout: 5s
+  retries: 30
+\end{lstlisting}
+
+For the \raft{} cluster, the integration script checks health by counting
+running containers (expecting four: DNS plus three nodes) and probing each node
+in turn. A node that fails to respond to \texttt{probe} is reported as
+unreachable.
+
+\endinput

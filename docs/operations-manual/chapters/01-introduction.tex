@@ -1,0 +1,180 @@
+\section{Introduction}
+\label{sec:introduction}
+
+\vannak{} is an experimental operational knowledge plane for data pipelines and
+metadata systems. It is not a generic log collector. Its purpose is to join
+runtime process state, data provenance, metadata meaning, and cluster ownership
+into a single low-latency operational view.
+
+\vannak{} combines four established lines of work:
+
+\begin{description}
+\item[\durga{}] process monitoring: what pipeline process or activity is
+  running, completed, failed, escalated, or cancelled.
+\item[\ipto{}] metadata management: what datasets, schemas, attributes, lineage,
+  classifications, contracts, and metadata objects mean.
+\item[\sitas{}] shard-local runtime structure: hot in-memory indexes, explicit
+  message passing, owned snapshots, and CPU/NUMA-aware placement.
+\item[\raft{}] cluster control: agreed ownership, placement maps, checkpoints,
+  and sealed-segment manifests (through the \graft{} implementation).
+\end{description}
+
+\subsection{The Operational Knowledge Plane}
+
+An operational knowledge plane connects information that monitoring tools,
+metadata catalogs, and workflow engines normally hold separately. A monitor can
+tell you an activity failed. A catalog can tell you what a dataset means. A
+workflow engine knows the process definition. None of them, on their own, can
+answer a cross-cutting operational question quickly.
+
+\vannak{} keeps recent operational state in memory, writes raw event history
+and metadata outbox entries to append-only segments, writes durable metadata to
+\ipto{}, and uses \raft{} for cluster coordination.
+
+\subsection{The Two Event Planes}
+\label{sec:intro-two-planes}
+
+\vannak{} deliberately separates two related but distinct event streams.
+
+\subsubsection{Process Events}
+
+Process events are \durga{} monitor lifecycle events. They describe what the
+pipeline process is doing. The Rust compatibility model mirrors \durga{}'s
+canonical \texttt{org.gautelis.durga.ProcessEvent} shape and is represented by
+\texttt{PipelineEvent} after ingestion. \vannak{} adds ingestion context such
+as source identity, tenant, environment, metadata references, and causal parent.
+
+\subsubsection{Data-Individual Metadata Events}
+
+Data-individual metadata events describe what happened to one flowing data item.
+They are provenance facts, not disposable monitoring telemetry. They are
+represented by \texttt{DataIndividualMetadataEvent} and carry passive metadata
+(received time, source, format, checksum) and active metadata (masking,
+transformation, validation, enrichment, field changes).
+
+\begin{vnote}
+A \durga{} lifecycle event can say that an activity ran. A data-individual
+metadata event says what happened to a specific data item during or around that
+activity. The two planes complement each other; they are never merged.
+\end{vnote}
+
+\subsection{Operational Questions}
+
+\vannak{} is designed to answer questions that need process state, provenance,
+metadata meaning, and cluster ownership at the same time:
+
+\begin{itemize}
+\item Which pipelines are unhealthy right now?
+\item Which datasets or metadata objects are affected by a failed activity?
+\item What passive and active metadata has been captured for this specific data
+  individual?
+\item Which \ipto{} repository instance owns the durable metadata for this data
+  item?
+\item What changed before an incident started?
+\item Which process instance last produced or modified a dataset?
+\item Which cluster node owns the hot state, checkpoints, and sealed event
+  segments for a pipeline or placement shard?
+\end{itemize}
+
+\subsection{The Thesis}
+
+The first thesis is that process events become much more valuable when they are
+joined with metadata meaning and kept in a low-latency shard-local index. The
+second, equally important thesis is that metadata about individual flowing data
+items must be captured durably as provenance facts, not treated as disposable
+monitoring telemetry.
+
+\subsection{Design Principles}
+
+\vannak{} grows under a small set of principles that should be preserved unless
+a task explicitly revises the architecture:
+
+\begin{enumerate}
+\item Keep high-volume event ingest out of the consensus hot path.
+\item Use \raft{} for cluster control state, ownership, manifests, checkpoints,
+  and metadata-version decisions.
+\item Use \sitas{} for shard-local hot indexes, bounded ingest, and explicit
+  cross-shard transfer.
+\item Treat \durga{} process events as semantically meaningful state
+  transitions, not unstructured logs.
+\item Use \ipto{} metadata to connect runtime events to datasets, schemas,
+  lineage, ownership, classifications, contracts, and versions.
+\item Treat data-individual metadata capture as a durable provenance plane.
+\item Route writes to \ipto{} by domain metadata placement, namely
+  \texttt{DataIndividualShardId}; do not confuse it with \sitas{} executor
+  shard ids.
+\item Do not acknowledge durable metadata capture until the event is safely
+  persisted to an outbox/segment or written idempotently to \ipto{}.
+\item Keep ordinary application state shard-local.
+\item Make cross-shard movement explicit through typed messages and handles.
+\item Observability APIs return owned snapshots.
+\end{enumerate}
+
+\subsection{Crate Structure}
+
+\vannak{} is a single Rust crate (\texttt{vannak}, edition 2024) with a
+dependency-free domain core. Integrations attach at the module boundaries
+rather than changing the core event model.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Module & Responsibility \\
+\hline
+\texttt{ingest} & typed process-event envelope and validation \\
+\texttt{process} & \durga{} process model and state reducer \\
+\texttt{data} & data-individual identity, metadata events, provenance facts \\
+\texttt{metadata} & typed metadata reference model \\
+\texttt{durga} & \durga{} monitor compatibility types \\
+\texttt{index} & dependency-free shard-local hot index \\
+\texttt{query} & query request and result types \\
+\texttt{ipto} & \ipto{} placement, mapping, payload, and outbox model \\
+\texttt{ipto\_adapter} & \ipto{} writer backed by \texttt{ipto\_rust} \\
+\texttt{storage} & append-only segment writer/reader and manifests \\
+\texttt{cluster} & \raft{}-facing control state and placement \\
+\texttt{raft\_sm} & \graft{} state machine adapter \\
+\texttt{observability} & owned snapshot types \\
+\texttt{runtime} & \sitas{} integration boundary \\
+\hline
+\end{tabular}
+\caption{Crate module layout and responsibilities.}
+\end{table}
+
+\subsection{Current Status and Maturity}
+
+This repository contains the dependency-free Rust core types and reducers plus
+optional adapters behind feature flags. The core is implemented and tested. It
+is not yet wired to live \durga{} Kafka topics or \sitas{} executors; those
+attach at the documented module boundaries.
+
+Implemented today: the \durga{}-compatible process-event mirror, the
+process-state reducer, typed metadata references, the single-node hot index,
+the data-individual provenance model, consistent-hash ring placement with
+range overrides, the \raft{}-replicable placement map with epoch-based query
+fallback, field-to-attribute mapping, the idempotent write payload, the
+in-memory and segment-backed metadata outbox, append-only segment storage, a
+concrete \ipto{} writer (\texttt{IptoRepoWriter}), the PROV-O SDL schema, and a
+\graft{} state machine adapter (\texttt{ClusterStateMachine}).
+
+\subsection{Feature Flags}
+
+\vannak{} keeps optional dependencies behind Cargo feature flags so the
+dependency-free core stays usable on its own.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Feature & Effect \\
+\hline
+(none) & dependency-free domain core only \\
+\texttt{ipto-writer} & enables \texttt{ipto\_adapter} backed by \texttt{ipto\_rust} \\
+\texttt{raft} & enables \texttt{raft\_sm} with the \graft{} state machine \\
+\texttt{node} & enables the \texttt{vannak-node} binary (implies \texttt{raft}) \\
+\hline
+\end{tabular}
+\caption{\vannak{} Cargo feature flags.}
+\end{table}
+
+\endinput

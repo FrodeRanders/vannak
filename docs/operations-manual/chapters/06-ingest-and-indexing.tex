@@ -1,0 +1,177 @@
+\section{Ingest and Indexing}
+\label{sec:ingest}
+
+This section covers how process events enter \vannak{}, how they are validated
+and deduplicated, how they reduce into shard-local state, the query primitives
+over that state, and how data-individual metadata events are captured.
+
+\subsection{Process Event Ingest}
+
+Process events enter as \texttt{PipelineEvent} values and are submitted to a
+shard-local \texttt{HotIndex} through \texttt{HotIndex::ingest}. The index is
+intentionally single-threaded; the expected \sitas{} integration holds one
+\texttt{HotIndex} per owning shard.
+
+\subsection{Validation}
+
+Before reduction, \texttt{HotIndex::ingest} calls
+\texttt{PipelineEvent::validate}, which requires that the core identity fields
+are non-empty: \texttt{event\_id}, \texttt{source\_id}, \texttt{tenant\_id},
+\texttt{environment\_id}, \texttt{pipeline\_id}, \texttt{process\_definition\_id},
+\texttt{process\_instance\_id}, and \texttt{timestamp}. A violation returns
+\texttt{IngestError::EmptyField} naming the offending field.
+
+\subsection{Deduplication}
+
+The index deduplicates by \texttt{event\_id}. If an event with the same id has
+already been ingested, the index increments its \texttt{duplicate\_events}
+counter and returns \texttt{IngestOutcome::Duplicate} without modifying state.
+This makes re-delivery of the same event safe and idempotent.
+
+\begin{lstlisting}
+pub fn ingest(&mut self, event: PipelineEvent) -> Result<IngestOutcome, IngestError> {
+    event.validate()?;
+    if self.events_by_id.contains_key(event.event_id()) {
+        self.duplicate_events += 1;
+        return Ok(IngestOutcome::Duplicate);
+    }
+    // ... reduce state and index ...
+    Ok(IngestOutcome::Accepted)
+}
+\end{lstlisting}
+
+\subsection{IngestOutcome}
+
+\texttt{IngestOutcome} is a small enum with two variants: \texttt{Accepted} when
+the event was reduced and indexed, and \texttt{Duplicate} when an event with the
+same id was already present.
+
+\subsection{Durga Mirroring}
+
+The \texttt{durga} module mirrors \durga{}'s canonical monitoring event as
+\texttt{DurgaProcessEvent}, with \texttt{DurgaStatus} and \texttt{DurgaEventType}
+that convert into \vannak{}'s \texttt{EventStatus} and \texttt{EventKind}. The
+method \texttt{into\_pipeline\_event} builds a \texttt{PipelineEvent},
+synthesizing the event id from the source id, process instance id, and source
+sequence, and copying optional fields such as activity, token, correlation,
+process version, business key, error, and payload.
+
+\subsection{HotIndex Structure}
+
+\texttt{HotIndex} keeps the current process state plus several secondary
+indexes, all keyed for ordered iteration:
+
+\begin{description}
+\item[\texttt{process\_instances}] current \texttt{ProcessInstanceState} per
+  instance.
+\item[\texttt{events\_by\_id}] full event store keyed by \texttt{event\_id}.
+\item[\texttt{events\_by\_process}] event ids per process instance.
+\item[\texttt{events\_by\_pipeline}] event ids per pipeline.
+\item[\texttt{events\_by\_metadata\_ref}] event ids per metadata reference, for
+  impact analysis.
+\item[\texttt{duplicate\_events}, \texttt{rejected\_events}] counters surfaced
+  in snapshots.
+\end{description}
+
+\subsection{Process State Reduction}
+
+Each accepted event is folded into the instance's
+\texttt{ProcessInstanceState::apply}. The reducer updates the coarse
+\texttt{ProcessStatus}, tracks the current activity, records per-activity
+\texttt{ActivityState}, and computes activity durations. When an activity
+reaches a terminal state, the reducer subtracts its recorded entry time from the
+event timestamp using \texttt{EventTimestamp::saturating\_duration\_until},
+producing a duration in milliseconds. A \texttt{ProcessFailed} event increments
+\texttt{retry\_count} and records the last error.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Event kind & Resulting process status \\
+\hline
+\texttt{ProcessStarted} & \texttt{Active} \\
+\texttt{ActivityEntered} & \texttt{Active} \\
+\texttt{ActivityCompleted} & \texttt{Active} \\
+\texttt{GatewayTaken} & \texttt{Active} \\
+\texttt{ActivityCancelled} & \texttt{Cancelled} \\
+\texttt{ProcessCompleted} & \texttt{Completed} \\
+\texttt{ProcessFailed} & \texttt{Failed} \\
+\hline
+\end{tabular}
+\caption{Process status transitions by event kind.}
+\end{table}
+
+\subsection{Query API Types}
+
+The \texttt{query} module defines the typed requests and a single owned result
+type. \texttt{QueryLimit} clamps to a minimum of 1 and defaults to 100.
+
+\begin{description}
+\item[\texttt{ProcessInstanceQuery}] fetch one instance snapshot by id.
+\item[\texttt{PipelineQuery}] list instance snapshots for a pipeline.
+\item[\texttt{EventQuery}] list events for a process instance.
+\item[\texttt{ImpactQuery}] list events touching a metadata reference.
+\item[\texttt{QueryResult}] either \texttt{ProcessInstances} or \texttt{Events}.
+\end{description}
+
+The matching \texttt{HotIndex} methods are \texttt{process\_instance},
+\texttt{pipeline\_instances}, \texttt{events}, \texttt{impact}, and
+\texttt{affected\_pipelines}. All return owned values; none expose borrowed
+references into shard-local state.
+
+\subsection{Data-Individual Metadata Events}
+
+Provenance is captured with \texttt{DataIndividualMetadataEvent}. The event
+carries identity (\texttt{DataIndividualId}, \texttt{MetadataEventId}), domain
+placement (\texttt{DataIndividualShardId}), process context, a timestamp, a
+\texttt{MetadataOperation}, and the passive and active metadata maps. A builder
+attaches optional activity id, passive metadata, active metadata, and source
+payload reference.
+
+\subsubsection{Passive and Active Metadata}
+
+\texttt{PassiveMetadata} captures what is observed at receive or create
+boundaries (source system, format, size, checksum, received time).
+\texttt{ActiveMetadata} captures what processing did (transformation plugin,
+masking, validation result, enrichment source, field changes). Both are
+insert-builders over \texttt{MetadataFieldName} to \texttt{MetadataValue}.
+
+\subsubsection{MetadataOperation}
+
+The operation classifies the provenance event: \texttt{Created},
+\texttt{Received}, \texttt{Transformed}, \texttt{Masked}, \texttt{Validated},
+\texttt{Enriched}, \texttt{Routed}, and \texttt{Persisted}. Several variants
+carry structured detail, such as the plugin name and version on
+\texttt{Transformed} or the pass flag on \texttt{Validated}.
+
+\subsection{Idempotency Key}
+
+Each metadata event derives a stable \texttt{IdempotencyKey} of the form
+\texttt{data\_individual\_id:metadata\_event\_id}. This key drives outbox
+deduplication and, downstream, the correlation id used for idempotent \ipto{}
+writes.
+
+\subsection{HotIndexSnapshot}
+
+\texttt{HotIndex::snapshot} returns an owned \texttt{HotIndexSnapshot} with
+counts only:
+
+\begin{lstlisting}
+pub struct HotIndexSnapshot {
+    pub process_instance_count: usize,
+    pub event_count: usize,
+    pub pipeline_count: usize,
+    pub metadata_ref_count: usize,
+    pub duplicate_events: u64,
+    pub rejected_events: u64,
+}
+\end{lstlisting}
+
+\begin{vnote}
+Snapshots are point-in-time copies of counters, not live views. Reading a
+snapshot never blocks or borrows the index, which keeps observability cheap and
+safe to expose across shard boundaries.
+\end{vnote}
+
+\endinput

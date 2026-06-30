@@ -1,0 +1,139 @@
+\section{Recovery}
+\label{sec:recovery}
+
+Recovery restores a node to a correct state after a restart or crash. \vannak{}
+relies on three durable substrates: append-only segments, file-backed \raft{}
+storage, and \raft{}-replicated checkpoint manifests.
+
+\subsection{Checkpoint Manifest}
+
+A \texttt{CheckpointManifest} is a shard-level recovery checkpoint replicated
+through \raft{}. It records, per segment, the last consumed record offset, so a
+recovering node can skip already-processed data.
+
+\begin{lstlisting}
+pub struct CheckpointManifest {
+    pub checkpoint_id: String,
+    pub node_id: NodeId,
+    pub epoch: CheckpointEpoch,
+    pub segment_offsets: BTreeMap<SegmentId, RecordOffset>,
+    pub metadata_version: Option<String>,
+    pub checksum: u64,
+}
+\end{lstlisting}
+
+The helper \texttt{latest\_offset\_for} returns the recorded offset for a given
+segment id, which seeds checkpoint-aware replay.
+
+\subsection{Recovery Flow}
+
+On restart a node reconstructs its operational state in order:
+
+\begin{enumerate}
+\item Load the \raft{} log and persistent state from disk.
+\item Install the latest \texttt{ClusterStateMachine} snapshot and replay any
+  log entries after it.
+\item Read the relevant \texttt{CheckpointManifest} and
+  \texttt{MetadataOutboxCheckpoint} records from the control state.
+\item Replay each owned segment after its checkpoint offset to rebuild pending
+  outbox state.
+\item Resume delivery of pending entries through the \texttt{IptoWriter}.
+\end{enumerate}
+
+\subsection{Outbox Recovery}
+
+Outbox recovery uses \texttt{replay\_metadata\_outbox\_segment\_after} with the
+checkpoint offset from \texttt{MetadataOutboxCheckpoint}. Records at or before
+the offset were already acknowledged and are skipped; records after it are
+re-queued as pending. The returned \texttt{MetadataOutboxReplaySummary} confirms
+how many records were scanned, skipped, and replayed.
+
+\begin{vnote}
+Because the durable outbox syncs each payload to its segment before exposing it
+as pending, no acknowledged write can be lost across a crash, and no pending
+write is forgotten: replay rebuilds it from the segment.
+\end{vnote}
+
+\subsection{Shard-Range Replay}
+
+When recovery coincides with a placement change, the shard-range replay
+primitive (Section~\ref{sec:rebalancing}) selects only the records for a shard
+range, allowing a recovering node to re-home a subset of pending entries to a
+new \ipto{} target rather than the original one.
+
+\subsection{Corruption Detection}
+
+Segments are self-describing and checksummed.
+\texttt{SegmentReader::open} rejects a file whose header is not the
+\texttt{VANNAK01} magic with \texttt{SegmentError::InvalidMagic}.
+\texttt{read\_next} recomputes each record's checksum and returns
+\texttt{SegmentError::ChecksumMismatch} (with the offset and both checksums) when
+they differ, so corruption is detected at the exact record during replay rather
+than silently propagated.
+
+\subsection{State Machine Snapshot}
+
+\texttt{ClusterStateMachine::snapshot} serializes the entire control state to
+JSON, and \texttt{restore} rebuilds it by replaying the snapshot through the
+normal command path. Because restore reuses \texttt{apply}, an installed
+snapshot is subject to the same validation as live commands, which guards
+against installing an inconsistent snapshot.
+
+\subsection{Raft Wrapping}
+
+The \texttt{vannak-node} binary wraps the control state in \raft{} using a
+\texttt{FileLogStore} and a \texttt{FilePersistentStateStore}. These persist the
+\raft{} log and the persistent node state under the data directory, so the
+\raft{} layer itself survives a restart and resumes from its committed index.
+
+\subsection{File-Backed Persistence}
+
+Each node is given a data directory and persists two subdirectories:
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Path & Contents \\
+\hline
+\filepath{<data-dir>/log} & \raft{} log entries (FileLogStore) \\
+\filepath{<data-dir>/state} & persistent \raft{} state (FilePersistentStateStore) \\
+\hline
+\end{tabular}
+\caption{Per-node file-backed persistence layout.}
+\end{table}
+
+In the cluster Compose file each node mounts a named volume at \filepath{/data},
+so this state survives container restarts.
+
+\subsection{Crash Recovery}
+
+After an unclean stop, a node restarts by loading its file-backed \raft{} state,
+re-electing or rejoining a leader, installing the latest state machine snapshot,
+and replaying committed log entries. Operational pending state is then rebuilt
+from segments using the checkpoints, as described above. No special operator
+action is required for a single-node crash within a healthy cluster.
+
+\subsection{Graceful Shutdown}
+
+A node runs an accept loop over its transport listener; shutdown is process
+termination, typically via \shellcmd{docker compose -f docker-compose.cluster.yml down}.
+This is safe because all durable state is already on disk: outbox segments are
+synced on enqueue, sealed segment manifests are recorded through \raft{}, and
+the \raft{} log and state are file-backed. A restarted node recovers from these.
+
+\subsection{Degraded Mode}
+
+\vannak{} degrades rather than failing hard in several situations:
+
+\begin{itemize}
+\item If DNS SRV discovery resolves no peers, a node logs a warning and starts
+  as a single node.
+\item During reconfiguration, reads use \texttt{resolve\_with\_fallback} and,
+  as a last resort, broadcast across \texttt{all\_ipto\_instances}.
+\item A permanent \texttt{IptoWriteError} leaves the affected outbox entry in
+  the \texttt{Failed} state for operator attention, while other entries continue
+  to deliver.
+\end{itemize}
+
+\endinput

@@ -1,0 +1,162 @@
+\section{Cluster Operations}
+\label{sec:cluster}
+
+This section describes the \raft{}-facing control plane: the compact control
+state, the commands that mutate it, the \graft{} state machine adapter, the
+read queries, and the \texttt{vannak-node} binary that hosts them.
+
+\subsection{ClusterControlState}
+
+\texttt{ClusterControlState} is a dependency-free reducer for the compact state a
+\raft{} state machine applies after log entries commit. Raw event traffic is
+never routed through it. It holds:
+
+\begin{description}
+\item[\texttt{nodes}] the set of cluster member node ids.
+\item[\texttt{placement\_maps}] epoch-keyed placement maps, bounded to five.
+\item[\texttt{writer\_leases}] the current lease per \ipto{} target.
+\item[\texttt{outbox\_checkpoints}] last acknowledged offsets per (shard, target).
+\item[\texttt{sealed\_segments}] sealed segment manifests by id.
+\item[\texttt{checkpoints}] recovery checkpoint manifests by id.
+\end{description}
+
+\subsection{ClusterControlCommand}
+
+All mutations flow through a single command enum, so the set of replicated
+state transitions is small and intentional.
+
+\begin{lstlisting}
+pub enum ClusterControlCommand {
+    AddNode(NodeId),
+    RemoveNode(NodeId),
+    SetIptoPlacementMap(IptoPlacementMap),
+    GrantWriterLease(WriterLease),
+    RecordOutboxCheckpoint(MetadataOutboxCheckpoint),
+    RecordSealedSegment(SegmentManifest),
+    RecordCheckpoint(CheckpointManifest),
+}
+\end{lstlisting}
+
+\subsection{State Machine Adapter}
+
+The \texttt{raft} feature provides \texttt{ClusterStateMachine}, which wraps
+\texttt{ClusterControlState} behind an \texttt{RwLock} so it can be shared
+across \raft{} threads behind an \texttt{Arc}. It implements
+\texttt{graft\_core::StateMachine} and \texttt{QueryableStateMachine}. Commands
+and snapshots are encoded as JSON via dedicated serializable mirror types so the
+core control types stay free of serialization concerns.
+
+\subsection{Apply, Snapshot, and Restore Flow}
+
+The \raft{} runtime drives the adapter through four operations:
+
+\begin{description}
+\item[\texttt{apply}] decodes the committed command and applies it under the
+  write lock; a decode error is ignored so a single bad entry cannot crash the
+  state machine.
+\item[\texttt{apply\_with\_result}] like \texttt{apply} but returns an encoded
+  error string when the command is rejected.
+\item[\texttt{snapshot}] serializes the entire control state to JSON under the
+  read lock.
+\item[\texttt{restore}] replaces the state by replaying a decoded snapshot.
+\end{description}
+
+Restore is implemented by replaying each element of the snapshot through
+\texttt{apply}, which means snapshot installation goes through the same
+validation as live commands.
+
+\subsection{Read Queries}
+
+Read-only access uses \texttt{ClusterQuery}, served by the queryable state
+machine without taking the write lock.
+
+\begin{lstlisting}
+pub enum ClusterQuery {
+    ResolveTarget { shard_id: u64 },
+    ResolveWithFallback { shard_id: u64 },
+    ListIptoInstances,
+    CurrentPlacementEpoch,
+    GetWriterLease { target: String },
+    GetOutboxCheckpoint { shard_id: u64, target: String },
+    GetSealedSegment { segment_id: String },
+}
+\end{lstlisting}
+
+Each query returns a JSON-encoded result, for example the resolved target name,
+the ordered fallback candidate list, the current placement epoch, or a lease
+holder.
+
+\subsection{Node Lifecycle}
+
+\texttt{AddNode} inserts a node into the membership set. \texttt{RemoveNode}
+removes it and also drops every writer lease that node held, so authority does
+not linger on a departed node. Membership is the basis for validating lease
+grants.
+
+\subsection{Placement Map Lifecycle}
+
+\texttt{SetIptoPlacementMap} installs a new map. The proposed epoch must be
+strictly greater than the current one or it is rejected with
+\texttt{StalePlacementEpoch}. After insertion the history is pruned to the five
+most recent epochs, supporting the query fallback described in
+Section~\ref{sec:topology}.
+
+\subsection{Writer Lease Lifecycle}
+
+\texttt{GrantWriterLease} requires the holder to be a known node
+(\texttt{UnknownLeaseHolder} otherwise) and a strictly greater
+\texttt{LeaseEpoch} than any current lease for the target
+(\texttt{StaleLeaseEpoch} otherwise). This gives single-writer authority per
+\ipto{} target with monotonic fencing.
+
+\subsection{Checkpoint Lifecycle}
+
+\texttt{RecordOutboxCheckpoint} and \texttt{RecordCheckpoint} both enforce
+monotonic epochs, rejecting stale records with \texttt{StaleCheckpointEpoch} and
+\texttt{StaleCheckpointManifest} respectively. \texttt{RecordSealedSegment}
+records a sealed \texttt{SegmentManifest} for the durable segment index.
+
+\subsection{Error Variants}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Variant & Condition \\
+\hline
+\texttt{NoPlacementSlots} & placement map built with no slots \\
+\texttt{ZeroVnodes} & a slot has zero virtual nodes \\
+\texttt{InvalidPlacementRange} & range end below start \\
+\texttt{OverlappingPlacementRanges} & two overrides overlap \\
+\texttt{StalePlacementEpoch} & placement epoch not advanced \\
+\texttt{UnknownLeaseHolder} & lease holder is not a node \\
+\texttt{StaleLeaseEpoch} & lease epoch not advanced \\
+\texttt{StaleCheckpointEpoch} & outbox checkpoint epoch not advanced \\
+\texttt{StaleCheckpointManifest} & checkpoint manifest epoch not advanced \\
+\hline
+\end{tabular}
+\caption{\texttt{ClusterControlError} variants.}
+\end{table}
+
+\subsection{The vannak-node Binary}
+
+The \texttt{node} feature builds \texttt{vannak-node}, which hosts a \raft{}
+node backed by \texttt{ClusterStateMachine}. It uses \graft{} components: a
+\texttt{FileLogStore}, a \texttt{FilePersistentStateStore}, a
+\texttt{RaftRuntime}, and a \texttt{RaftHandler} dispatching over a TCP listener
+with the \graft{} envelope codec. Peers are discovered from DNS SRV records or
+an explicit peer list.
+
+\begin{lstlisting}[numbers=none]
+vannak-node serve <host> <port> <peer-id> <data-dir> <peers...>
+vannak-node --srv _vannak._tcp.vannak.local <host> <port> <peer-id> <data-dir>
+vannak-node probe <host> <port>
+\end{lstlisting}
+
+\begin{vnote}
+On Linux the binary binds dual-stack (\texttt{[::]}) when given a wildcard or
+loopback host, so a single listener accepts both IPv4 and IPv6 traffic inside
+the container network.
+\end{vnote}
+
+\endinput

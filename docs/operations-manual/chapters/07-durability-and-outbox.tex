@@ -1,0 +1,191 @@
+\section{Durability}
+\label{sec:durability}
+
+Process monitoring is high-volume and recent-state oriented. Data-individual
+metadata capture has a stronger requirement: it must not be silently lost. This
+section describes the append-only segment substrate and the metadata outbox
+that together provide durable, replayable capture.
+
+\subsection{Segment Format}
+
+Segments are a dependency-free durability substrate for raw events and metadata
+outbox entries. The format is intentionally small: an eight-byte magic header
+followed by length-prefixed, checksummed records.
+
+\begin{lstlisting}[numbers=none]
+magic[8]                  // the bytes "VANNAK01"
+repeated:
+  len: u32 little endian
+  checksum: u64 little endian
+  payload: [u8; len]
+\end{lstlisting}
+
+The per-record checksum is a stable non-cryptographic FNV-1a derivative over the
+payload, for corruption detection rather than tamper resistance. A rolling
+segment checksum combines record checksums with
+\texttt{current.rotate\_left(7) \^{} next}.
+
+\subsection{SegmentWriter and SegmentReader}
+
+\texttt{SegmentWriter::create} opens a new file (failing if it already exists),
+writes the magic header, and tracks \texttt{record\_count}, \texttt{byte\_len},
+and the rolling checksum. \texttt{append\_record} returns the
+\texttt{RecordOffset} at which the record begins; records larger than
+\texttt{u32::MAX} are rejected with \texttt{SegmentError::RecordTooLarge}.
+
+\begin{lstlisting}
+pub fn append_record(&mut self, payload: &[u8]) -> Result<RecordOffset, SegmentError> {
+    if payload.len() > MAX_RECORD_LEN {
+        return Err(SegmentError::RecordTooLarge { len: payload.len() });
+    }
+    let offset = self.byte_len;
+    let record_checksum = checksum(payload);
+    let len = payload.len() as u32;
+    self.file.write_all(&len.to_le_bytes())?;
+    self.file.write_all(&record_checksum.to_le_bytes())?;
+    self.file.write_all(payload)?;
+    self.record_count += 1;
+    self.byte_len += 4 + 8 + payload.len() as u64;
+    self.checksum = combine_checksum(self.checksum, record_checksum);
+    Ok(RecordOffset(offset))
+}
+\end{lstlisting}
+
+\texttt{SegmentReader::open} validates the magic (returning
+\texttt{SegmentError::InvalidMagic} on mismatch). \texttt{read\_next} returns
+\texttt{Ok(None)} at end of file and verifies each record's checksum, returning
+\texttt{SegmentError::ChecksumMismatch} when it differs.
+
+\subsection{SegmentManifest}
+
+A sealed or in-progress segment is described by an owned
+\texttt{SegmentManifest}:
+
+\begin{lstlisting}
+pub struct SegmentManifest {
+    pub segment_id: SegmentId,
+    pub node_id: NodeId,
+    pub path: PathBuf,
+    pub record_count: u64,
+    pub byte_len: u64,
+    pub checksum: u64,
+}
+\end{lstlisting}
+
+\texttt{SegmentWriter::seal} flushes, syncs, and returns the final manifest. The
+manifest is the unit that is later recorded into the cluster control state as a
+sealed segment.
+
+\subsection{MetadataOutbox}
+
+\texttt{MetadataOutbox} is the in-memory delivery queue. Entries are keyed by
+\texttt{IdempotencyKey}, with a separate \texttt{pending} queue for ordering.
+\texttt{enqueue} returns \texttt{OutboxEnqueueResult::Enqueued} for a new key or
+\texttt{Duplicate} for a known one. Each \texttt{MetadataOutboxEntry} carries its
+payload, status, optional record offset, retry count, and last error.
+
+\subsubsection{Pending, Acknowledged, Failed}
+
+\texttt{OutboxStatus} has three states. \texttt{acknowledge} marks an entry
+delivered and removes it from the pending queue. \texttt{fail} marks it failed,
+increments \texttt{retry\_count}, records the error, and removes it from
+pending. \texttt{retry\_failed} returns a failed entry to pending.
+
+\subsection{Delivery}
+
+\texttt{deliver\_next\_pending} takes the next pending entry, calls the
+\texttt{IptoWriter}, and either acknowledges it or records the failure (carrying
+the writer's retryable flag).
+
+\begin{lstlisting}
+pub enum MetadataOutboxDeliveryResult {
+    NoPending,
+    Acknowledged { idempotency_key: IdempotencyKey },
+    Failed { idempotency_key: IdempotencyKey, retryable: bool, message: String },
+}
+\end{lstlisting}
+
+\texttt{drain\_pending\_outbox} delivers up to \texttt{max\_attempts} entries and
+returns a \texttt{MetadataOutboxDrainSummary} with \texttt{attempted},
+\texttt{acknowledged}, \texttt{failed}, and \texttt{stopped\_after\_failure}.
+Draining stops early after a retryable failure so transient backend outages do
+not burn the attempt budget.
+
+\subsection{Segment-Backed Outbox}
+
+\texttt{SegmentBackedMetadataOutbox} couples an outbox with a
+\texttt{SegmentWriter}. The key method, \texttt{enqueue\_durable}, appends and
+syncs the encoded payload to the segment \emph{before} making the entry visible
+as pending in memory. This guarantees that capture is durable before it is ever
+acknowledged.
+
+\begin{lstlisting}
+pub fn enqueue_durable(&mut self, payload: IptoWritePayload)
+    -> Result<DurableOutboxEnqueueResult, MetadataOutboxStorageError>
+{
+    if self.outbox.entries.contains_key(&payload.idempotency_key) {
+        return Ok(DurableOutboxEnqueueResult::Duplicate);
+    }
+    let offset = self.writer.append_record(&payload.encode())?;
+    self.writer.sync()?;
+    self.outbox.enqueue_with_offset(payload, Some(offset));
+    Ok(DurableOutboxEnqueueResult::Enqueued { offset })
+}
+\end{lstlisting}
+
+\begin{vnote}
+Durable capture is never acknowledged before the encoded payload is persisted to
+a segment. This honors the principle that data-individual provenance must not be
+treated as best-effort monitoring.
+\end{vnote}
+
+\subsection{Snapshots}
+
+\texttt{MetadataOutbox::snapshot} returns a \texttt{MetadataOutboxSnapshot} with
+\texttt{total}, \texttt{pending}, \texttt{acknowledged}, \texttt{failed}, and
+\texttt{queued\_pending} counts. The segment-backed wrapper returns a
+\texttt{SegmentBackedMetadataOutboxSnapshot} that pairs the outbox snapshot with
+the current \texttt{SegmentManifest}.
+
+\subsection{Segment Replay}
+
+After a restart, pending delivery state is rebuilt from the segment.
+\texttt{replay\_metadata\_outbox\_segment} decodes every record into a fresh
+outbox. \texttt{replay\_metadata\_outbox\_segment\_after} skips records at or
+before a checkpoint offset and returns a \texttt{MetadataOutboxReplay} containing
+the rebuilt outbox and a \texttt{MetadataOutboxReplaySummary}.
+
+\begin{lstlisting}
+pub struct MetadataOutboxReplaySummary {
+    pub checkpoint_offset: Option<RecordOffset>,
+    pub scanned_records: usize,
+    pub skipped_records: usize,
+    pub replayed_records: usize,
+}
+\end{lstlisting}
+
+\subsection{Checkpoints}
+
+\texttt{SegmentBackedMetadataOutbox::acknowledged\_checkpoint} produces a
+\texttt{MetadataOutboxCheckpoint} from the highest acknowledged record offset for
+a given target. This checkpoint can then be proposed through the cluster control
+plane so a recovering node can replay only the records after it.
+
+\subsection{Outbox Checkpoint Data}
+
+\begin{lstlisting}
+pub struct MetadataOutboxCheckpoint {
+    pub data_individual_shard_id: DataIndividualShardId,
+    pub target: IptoInstanceId,
+    pub segment_id: SegmentId,
+    pub last_acknowledged_offset: RecordOffset,
+    pub mapping_version: String,
+    pub epoch: CheckpointEpoch,
+}
+\end{lstlisting}
+
+The checkpoint records which shard and target it covers, the segment and offset
+up to which delivery is durable, the mapping version in force, and a monotonic
+\texttt{CheckpointEpoch} used to reject stale records.
+
+\endinput

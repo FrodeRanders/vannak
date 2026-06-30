@@ -1,0 +1,176 @@
+\section{Ipto Integration}
+\label{sec:ipto}
+
+This section describes how \vannak{} delivers durable metadata into \ipto{}: the
+writer abstraction, the concrete PostgreSQL-backed writer, idempotency, the
+PROV-O schema, and how payloads become \ipto{} units.
+
+\subsection{The IptoWriter Trait}
+
+The delivery boundary is a single-method trait. Keeping it minimal lets the
+dependency-free outbox model drive any concrete backend.
+
+\begin{lstlisting}
+pub trait IptoWriter {
+    fn write(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError>;
+}
+\end{lstlisting}
+
+\texttt{IptoWriteError} distinguishes \texttt{retryable} from \texttt{permanent}
+failures. The outbox uses the retryable flag to decide whether to stop draining
+and try again later or to leave the entry failed for operator attention.
+
+\subsection{IptoRepoWriter}
+
+\texttt{IptoRepoWriter} is the concrete writer enabled by the
+\texttt{ipto-writer} feature. It persists metadata through
+\texttt{ipto\_rust::RepoService} on a PostgreSQL backend. It holds the repo
+service, the target tenant id, a cache of resolved attribute ids, and a flag
+recording whether the SDL has been configured.
+
+\begin{lstlisting}
+let backend: Arc<dyn ipto_rust::backend::Backend> =
+    Arc::new(ipto_rust::backends::postgres::PostgresBackend::new());
+let repo = Arc::new(ipto_rust::repo::RepoService::new(backend));
+
+let mut writer = IptoRepoWriter::new(repo, 1);
+writer.configure_sdl()?;
+\end{lstlisting}
+
+\subsection{configure\_sdl()}
+
+\texttt{configure\_sdl()} must be called once at startup before any write. It
+persists the PROV-O attribute and template definitions, then resolves each
+attribute's qualified name to its numeric id and datatype, caching them for
+efficient payload construction. The call is idempotent; subsequent calls are
+no-ops once the SDL has been configured.
+
+\subsection{PROV-O Attributes}
+
+The built-in \texttt{PROV\_O\_SDL} constant declares a datatype registry, an
+attribute registry, and a \texttt{ProvEntity} template. The registry includes
+the core PROV-O properties plus \vannak{}-specific attributes.
+
+\begin{lstlisting}[numbers=none]
+enum Attributes @attributeRegistry {
+    prov_generatedAtTime   @attribute(datatype: TIME,   ...)
+    prov_wasAttributedTo   @attribute(datatype: STRING, ...)
+    prov_value             @attribute(datatype: STRING, ...)
+    vannak_data_individual @attribute(datatype: STRING, name: "vannak:dataIndividualId")
+    vannak_process_instance @attribute(datatype: STRING, name: "vannak:processInstanceId")
+    vannak_activity_id     @attribute(datatype: STRING, name: "vannak:activityId")
+    vannak_pipeline_id     @attribute(datatype: STRING, name: "vannak:pipelineId")
+}
+\end{lstlisting}
+
+\subsection{Correlation ID}
+
+Idempotency is anchored on a correlation id deterministically derived from the
+\texttt{IdempotencyKey} by \texttt{corrid\_for\_key}. The function hashes the
+key with two seeded FNV-1a passes and formats the result as a 36-character,
+UUID-v7-shaped string. The same key always yields the same correlation id, and
+distinct keys yield distinct ids.
+
+\subsection{Idempotent Writes}
+
+On each write, \texttt{IptoRepoWriter} first refuses to proceed if the SDL is
+not configured (a permanent error). It then computes the correlation id and
+checks for an existing unit via \texttt{get\_unit\_by\_corrid\_json}. If a unit
+already exists, the write is a no-op success; otherwise it builds and stores a
+new unit.
+
+\begin{lstlisting}
+fn write(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError> {
+    if !self.sdl_configured {
+        return Err(IptoWriteError::permanent("SDL not configured"));
+    }
+    let corrid = self.corrid_for_key(&payload.idempotency_key);
+    match self.repo.get_unit_by_corrid_json(&corrid)? {
+        Some(_existing) => Ok(()),
+        None => {
+            let unit = self.build_unit_payload(payload)?;
+            self.repo.store_unit_json(unit)?;
+            Ok(())
+        }
+    }
+}
+\end{lstlisting}
+
+\subsection{MetadataValue to JSON}
+
+\texttt{metadata\_value\_to\_json} converts each \texttt{MetadataValue} into a
+JSON array (the \ipto{} unit attribute value shape). A scalar becomes a
+single-element array; a \texttt{StringList} becomes a multi-element array.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+\texttt{MetadataValue} & JSON form \\
+\hline
+\texttt{String(s)} & \texttt{[s]} \\
+\texttt{Integer(i)} & \texttt{[i]} \\
+\texttt{Boolean(b)} & \texttt{[b]} \\
+\texttt{Timestamp(t)} & \texttt{[t-as-string]} \\
+\texttt{StringList(v)} & \texttt{[v0, v1, ...]} \\
+\hline
+\end{tabular}
+\caption{\texttt{MetadataValue} to \ipto{} attribute JSON.}
+\end{table}
+
+\subsection{Attribute Resolution}
+
+When building a unit, only attributes present in the cached \texttt{attr\_ids}
+map are emitted. Each emitted attribute carries its numeric \texttt{attrid}, a
+numeric \texttt{attrtype} (1 string, 2 time, 3 integer, 4 long, 5 double, 6
+boolean, 7 data), and the JSON value. Unmapped attributes are silently skipped,
+so the mapping version controls exactly what reaches \ipto{}.
+
+\subsection{Unit Payload Format}
+
+The constructed unit is a JSON object with the tenant id, the correlation id,
+status 30 (EFFECTIVE), and the resolved attribute list.
+
+\begin{lstlisting}
+let unit = serde_json::json!({
+    "tenantid": self.tenant_id,
+    "corrid": corrid,
+    "status": 30,
+    "attributes": attributes,
+});
+\end{lstlisting}
+
+\subsection{Internal Relations}
+
+The current writer stores each provenance event as a standalone EFFECTIVE unit
+under the \texttt{ProvEntity} template. Relations between provenance units (for
+example PROV-O \texttt{wasDerivedFrom} edges linking successive operations on
+the same data individual) are not yet emitted; the data-individual id attribute
+provides the join key for assembling them in queries.
+
+\subsection{Backend Connectivity}
+
+\texttt{PostgresBackend::new} reads the \texttt{IPTO\_PG\_*} environment
+variables (see Section~\ref{sec:configuration}) with local defaults that match
+the test PostgreSQL container. The backend is wrapped in an \texttt{Arc} and
+shared by a \texttt{RepoService}.
+
+\subsection{PostgreSQL Schema}
+
+The \ipto{} schema, stored procedures, and boot data are loaded from
+\filepath{../ipto/shared/db/postgresql} by the test Compose file. The boot data
+seeds tenant id 1 (\texttt{SCRATCH}), which the writer uses by default.
+
+\subsection{Search Verification}
+
+Persistence can be verified with \texttt{RepoService::search\_units}. The
+integration test searches for units with tenant id 1 and status 30 and asserts
+that at least the expected number of provenance units exist after delivery.
+
+\begin{vnote}
+Because writes are idempotent on the correlation id, re-running delivery does
+not create duplicate units. A search after a re-run returns the same units,
+which makes the flow safe to replay during recovery.
+\end{vnote}
+
+\endinput

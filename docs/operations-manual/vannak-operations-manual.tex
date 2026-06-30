@@ -1,0 +1,97 @@
+\documentclass{techdoc}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{underscore}
+\usepackage{tabularx}
+\usepackage{nameref}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{longtable}
+\usepackage{framed}
+
+% ---------------------------------------------------------------------------
+% Colors
+% ---------------------------------------------------------------------------
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{HTML}{C42043}
+\definecolor{backcolour}{HTML}{F2F2F2}
+\definecolor{notebg}{HTML}{FFF8DC}
+
+% ---------------------------------------------------------------------------
+% Listing style
+% ---------------------------------------------------------------------------
+\lstdefinestyle{manualstyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codepurple},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\footnotesize\ttfamily,
+    numbers=left,
+    breaklines=true,
+    upquote=true,
+    frame=single,
+    framerule=0.4pt,
+    tabsize=2,
+}
+\lstset{style=manualstyle}
+
+% ---------------------------------------------------------------------------
+% Custom commands
+% ---------------------------------------------------------------------------
+\newcommand{\vannak}{Vannak}
+\newcommand{\durga}{Durga}
+\newcommand{\ipto}{Ipto}
+\newcommand{\sitas}{Sitas}
+\newcommand{\raft}{Raft}
+\newcommand{\graft}{graft}
+
+% An environment for informational notes
+\newenvironment{vnote}{%
+  \begin{framed}
+  \noindent\textbf{Note:}%
+}{%
+  \end{framed}
+}
+
+% ---------------------------------------------------------------------------
+% Document metadata
+% ---------------------------------------------------------------------------
+\date{\today}
+\title{Vannak}
+\subtitle{Operations Manual}
+\author{Frode Randers}
+
+\begin{document}
+
+\rhead{}
+\maketitle
+
+\vfill
+\begin{center}
+\textit{Operational knowledge plane for data pipelines and metadata systems.}
+
+\vspace{3mm}
+\small\textit{Combining \durga{} process events, \ipto{} metadata management, \\ \sitas{} shard-local runtime, and \raft{} cluster consensus.}
+\end{center}
+\newpage
+
+\tableofcontents
+\newpage
+
+\input{chapters/01-introduction.tex}          \newpage
+\input{chapters/02-system-overview.tex}       \newpage
+\input{chapters/03-setup-and-installation.tex} \newpage
+\input{chapters/04-topology-and-placement.tex} \newpage
+\input{chapters/05-configuration.tex}          \newpage
+\input{chapters/06-ingest-and-indexing.tex}    \newpage
+\input{chapters/07-durability-and-outbox.tex}  \newpage
+\input{chapters/08-ipto-integration.tex}       \newpage
+\input{chapters/09-cluster-operations.tex}     \newpage
+\input{chapters/10-rebalancing.tex}            \newpage
+\input{chapters/11-observability.tex}          \newpage
+\input{chapters/12-recovery.tex}               \newpage
+\input{chapters/13-appendix.tex}               \newpage
+
+\end{document}

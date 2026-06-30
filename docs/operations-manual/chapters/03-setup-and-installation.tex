@@ -1,0 +1,187 @@
+\section{Setup}
+\label{sec:setup}
+
+This section describes how to build \vannak{}, bring up the supporting
+infrastructure, and verify a working installation.
+
+\subsection{Prerequisites}
+
+\begin{description}
+\item[Rust] stable toolchain with edition 2024 support. The Docker build uses
+  \texttt{rust:1-bookworm}.
+\item[Docker] with the Compose plugin, for PostgreSQL and the \raft{} cluster.
+\item[protobuf-compiler] required by the \graft{} transport crates when
+  building the \texttt{node} feature. On Debian/Ubuntu install with
+  \shellcmd{apt-get install protobuf-compiler}.
+\item[dnsutils] (the \shellcmd{dig} command) is needed at runtime by
+  \texttt{vannak-node} for DNS SRV peer discovery. The runtime image installs
+  it automatically.
+\end{description}
+
+\subsection{Sibling Repositories}
+
+\vannak{} depends on two sibling repositories via local path dependencies. They
+must be checked out next to the \vannak{} repository:
+
+\begin{lstlisting}[numbers=none]
+parent/
+  vannak/   (this repository)
+  ipto/     (Ipto metadata system; ../ipto/implementations/rust)
+  raft/     (graft Raft implementation; ../raft/graft-rust)
+\end{lstlisting}
+
+The \texttt{ipto-writer} feature uses \filepath{../ipto/implementations/rust},
+and the \texttt{raft} and \texttt{node} features use the crates under
+\filepath{../raft/graft-rust}. The PostgreSQL Compose file mounts the \ipto{}
+SQL schema from \filepath{../ipto/shared/db/postgresql}.
+
+\subsection{Building}
+
+The dependency-free core builds and tests with no feature flags:
+
+\begin{lstlisting}[numbers=none]
+cargo build
+cargo test
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+\end{lstlisting}
+
+Building with feature flags enables the optional adapters:
+
+\begin{lstlisting}[numbers=none]
+cargo build --features ipto-writer
+cargo build --features raft
+cargo build --features node --bin vannak-node
+\end{lstlisting}
+
+\begin{vnote}
+The \texttt{node} feature implies \texttt{raft}. The \texttt{vannak-node}
+binary is only compiled when the \texttt{node} feature is active.
+\end{vnote}
+
+\subsection{Docker Compose for PostgreSQL}
+
+The file \filepath{docker-compose.test.yml} starts a PostgreSQL 16 instance
+preloaded with the \ipto{} schema, stored procedures, and boot data. The
+integration test connects to this instance.
+
+\begin{lstlisting}[numbers=none]
+docker compose -f docker-compose.test.yml up -d
+VANNAK_PG_INTEGRATION=1 cargo test --features ipto-writer --test vannak_integration
+docker compose -f docker-compose.test.yml down -v
+\end{lstlisting}
+
+The Compose service sets the environment variables \texttt{POSTGRES\_USER},
+\texttt{POSTGRES\_PASSWORD}, and \texttt{POSTGRES\_DB} (all \texttt{repo}), and
+exposes port 5432 (override with \texttt{VANNAK\_PG\_PORT}). Three SQL files are
+mounted into \filepath{/docker-entrypoint-initdb.d} in order:
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Mounted file & Purpose \\
+\hline
+\filepath{00_schema.sql} & \ipto{} table schema \\
+\filepath{01_procedures.sql} & stored procedures \\
+\filepath{02_boot.sql} & boot data (tenant id 1 = \texttt{SCRATCH}) \\
+\hline
+\end{tabular}
+\caption{PostgreSQL initialization files for the test backend.}
+\end{table}
+
+\subsection{Database Initialization}
+
+PostgreSQL runs the files under \filepath{/docker-entrypoint-initdb.d} once, on
+first start of an empty data volume. The \filepath{boot.sql} script seeds tenant
+id 1 (\texttt{SCRATCH}), which \texttt{IptoRepoWriter} uses by default. To
+re-run initialization, tear the volume down with \shellcmd{docker compose -f docker-compose.test.yml down -v}.
+
+\subsection{Docker Compose for the Raft Cluster}
+
+The file \filepath{docker-compose.cluster.yml} starts a three-node \vannak{}
+\raft{} cluster with DNS-based auto-discovery. A CoreDNS container serves static
+SRV records so the nodes find each other at startup.
+
+\begin{lstlisting}[numbers=none]
+docker compose -f docker-compose.cluster.yml build
+docker compose -f docker-compose.cluster.yml up -d
+docker compose -f docker-compose.cluster.yml down -v
+\end{lstlisting}
+
+The topology assigns static addresses on the \texttt{raft-net} bridge network
+(subnet \texttt{10.77.0.0/24}):
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lll}
+\hline
+Container & Address & Role \\
+\hline
+\texttt{vannak-dns} & \texttt{10.77.0.10} & CoreDNS server \\
+\texttt{vannak-1} & \texttt{10.77.0.11} & \raft{} node \\
+\texttt{vannak-2} & \texttt{10.77.0.12} & \raft{} node \\
+\texttt{vannak-3} & \texttt{10.77.0.13} & \raft{} node \\
+\hline
+\end{tabular}
+\caption{Cluster Compose topology and static addresses.}
+\end{table}
+
+Each node listens on port 10081 and starts with
+\shellcmd{--srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-N /data}, where
+the SRV service name resolves to the three node A-records through CoreDNS.
+
+\subsection{Integration Test Scripts}
+
+The script \filepath{scripts/run-integration-test.sh} orchestrates both
+infrastructure stacks.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Invocation & Behavior \\
+\hline
+\shellcmd{./scripts/run-integration-test.sh} & PostgreSQL + \ipto{} writer flow \\
+\shellcmd{./scripts/run-integration-test.sh --cluster} & also start the \raft{} cluster \\
+\shellcmd{./scripts/run-integration-test.sh --no-build} & skip the build step \\
+\shellcmd{./scripts/run-integration-test.sh --down} & tear down all stacks \\
+\hline
+\end{tabular}
+\caption{Integration test runner modes.}
+\end{table}
+
+The script starts PostgreSQL, runs the \texttt{vannak\_integration} test with
+\texttt{VANNAK\_PG\_INTEGRATION=1}, and, when \texttt{--cluster} is given,
+builds the node image, brings up the three nodes, waits for leader election,
+and probes each node.
+
+\subsection{Verification}
+
+\begin{enumerate}
+\item \shellcmd{cargo test} succeeds for the dependency-free core.
+\item With PostgreSQL up and \texttt{VANNAK\_PG\_INTEGRATION=1}, the
+  \texttt{vannak\_integration} test passes the full ingest, index, outbox, and
+  \ipto{} writer flow.
+\item For the cluster, \shellcmd{docker compose -f docker-compose.cluster.yml ps}
+  shows four running containers (DNS plus three nodes), and
+  \shellcmd{vannak-node probe localhost 10081} returns a cluster summary.
+\end{enumerate}
+
+\subsection{Feature Flag Reference}
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Feature & Pulled-in dependencies \\
+\hline
+\texttt{ipto-writer} & \texttt{ipto\_rust}, \texttt{serde\_json}, \texttt{uuid} \\
+\texttt{raft} & \texttt{graft-core}, \texttt{serde}, \texttt{serde\_json} \\
+\texttt{node} & \texttt{raft} plus \texttt{graft-runtime}, \texttt{graft-storage}, \texttt{graft-transport}, \texttt{graft-proto}, \texttt{tokio}, \texttt{parking\_lot}, \texttt{bytes} \\
+\hline
+\end{tabular}
+\caption{Feature flags and the dependencies they enable.}
+\end{table}
+
+\endinput

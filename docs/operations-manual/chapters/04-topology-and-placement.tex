@@ -1,0 +1,193 @@
+\section{Topology}
+\label{sec:topology}
+
+This section describes how \vannak{} places durable metadata across \ipto{}
+instances. Placement is deterministic, epoch-versioned, and replicated through
+\raft{}, while the ring itself is rebuilt deterministically on each node.
+
+\subsection{Shard Model}
+
+\vannak{} distinguishes two unrelated notions of ``shard'':
+
+\begin{description}
+\item[\sitas{} shard id] where work is currently processed (executor placement).
+\item[\texttt{DataIndividualShardId}] which \ipto{} repository instance owns the
+  durable metadata for a data item (domain placement).
+\end{description}
+
+A \sitas{} shard may ingest, buffer, index, or retry a metadata event, but the
+final \ipto{} destination is selected by \texttt{DataIndividualShardId} through
+the placement resolver. The two must never be conflated.
+
+\subsection{Shard ID Derivation}
+
+\texttt{DataIndividualShardId} is a \texttt{u64} newtype. A shard id can be
+derived deterministically from a stable data-individual identity using
+\texttt{DataIndividualShardId::from\_data\_individual}, which hashes the
+identity string with an FNV-1a derivative so ids are uniformly distributed
+across the \texttt{u64} space.
+
+\begin{lstlisting}
+pub fn from_data_individual(data_individual_id: &DataIndividualId) -> Self {
+    let mut state = 0xcbf2_9ce4_8422_2325u64;
+    for byte in data_individual_id.as_str().as_bytes() {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Self(state)
+}
+\end{lstlisting}
+
+Callers may instead assign an explicit \texttt{DataIndividualShardId} when the
+placement key carries business meaning, such as scoping all data for a tenant to
+a dedicated shard range.
+
+\subsection{Consistent Hash Ring}
+
+The primary placement mechanism is a deterministic consistent-hash ring over the
+\texttt{u64} space, represented by \texttt{IptoPlacementRing}. Each \ipto{}
+instance contributes a configurable number of virtual nodes. The ring is sorted
+and binary-searched to resolve a \texttt{DataIndividualShardId} to an instance.
+
+\begin{lstlisting}
+pub fn resolve(&self, shard_id: DataIndividualShardId) -> Option<&IptoInstanceId> {
+    if self.points.is_empty() {
+        return None;
+    }
+    let idx = self
+        .points
+        .binary_search_by_key(&shard_id.0, |p| p.position)
+        .unwrap_or_else(|i| i);
+    Some(&self.points[idx % self.points.len()].instance)
+}
+\end{lstlisting}
+
+\subsection{Virtual Nodes}
+
+Each \texttt{IptoPlacementSlot} pairs an \texttt{IptoInstanceId} with a
+\texttt{vnodes} count. A slot must have at least one virtual node; constructing a
+slot with zero virtual nodes returns \texttt{ClusterControlError::ZeroVnodes}.
+More virtual nodes per instance produce a smoother distribution. Typical
+configurations use 64 to 256 virtual nodes per instance.
+
+\subsection{FNV-1a Hash Placement}
+
+Virtual node positions are computed by \texttt{ring\_hash(instance, vnode\_idx)},
+the same FNV-1a family used for the segment checksum and shard derivation. Both
+the instance name and the virtual node index are fed through the full mixing
+loop, giving good distribution and full determinism.
+
+\begin{lstlisting}
+fn ring_hash(instance: &str, vnode_idx: u32) -> u64 {
+    let mut state = 0xcbf2_9ce4_8422_2325u64;
+    for byte in instance.as_bytes() {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    for byte in &vnode_idx.to_le_bytes() {
+        state ^= u64::from(*byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    state
+}
+\end{lstlisting}
+
+\subsection{Ring Determinism}
+
+Because the ring is built only from the slot configuration and a fixed hash
+function, every node constructs an identical ring from the same slots. The ring
+points themselves are never replicated; \raft{} replicates only the slots and
+overrides. Two rings built from the same slots resolve every shard id
+identically.
+
+\subsection{Adding and Removing Instances}
+
+Adding or removing an \ipto{} instance changes only a small fraction of the
+shard space, proportional to one over the number of instances. Empirically,
+growing a three-instance ring to four instances (256 virtual nodes each) moves
+roughly one quarter of shards, and the moved fraction is bounded well away from
+a full reshuffle.
+
+\subsection{Range Overrides}
+
+Operators may pin an inclusive shard range to a specific instance with an
+\texttt{IptoPlacementRange}. Overrides take priority over the ring, so they are
+the mechanism for deliberate, business-driven placement (for example, routing a
+compliance-sensitive shard range to a dedicated instance).
+
+\begin{lstlisting}
+pub struct IptoPlacementRange {
+    pub start: DataIndividualShardId,
+    pub end: DataIndividualShardId,
+    pub target: IptoInstanceId,
+}
+\end{lstlisting}
+
+A range with \texttt{end} less than \texttt{start} is rejected with
+\texttt{ClusterControlError::InvalidPlacementRange}, and overlapping ranges are
+rejected with \texttt{ClusterControlError::OverlappingPlacementRanges}.
+
+\subsection{Placement Maps}
+
+An \texttt{IptoPlacementMap} combines a ring (built from slots) with optional
+range overrides, tagged by a \texttt{PlacementEpoch}. Resolution checks
+overrides first, then falls back to the ring.
+
+\begin{lstlisting}
+pub fn resolve(&self, shard_id: DataIndividualShardId) -> Option<&IptoInstanceId> {
+    for range in &self.overrides {
+        if range.contains(shard_id) {
+            return Some(&range.target);
+        }
+    }
+    self.ring.resolve(shard_id)
+}
+\end{lstlisting}
+
+A map requires at least one slot; an empty slot list is rejected with
+\texttt{ClusterControlError::NoPlacementSlots}.
+
+\subsection{Placement History and Fallback}
+
+\texttt{ClusterControlState} keeps a bounded history of placement maps. The
+constant \texttt{MAX\_PLACEMENT\_HISTORY} is 5, so the five most recent epochs
+are retained and older epochs are pruned. New maps must have a strictly greater
+epoch than the current one, or they are rejected with
+\texttt{ClusterControlError::StalePlacementEpoch}.
+
+The method \texttt{resolve\_with\_fallback} returns candidate instances in
+priority order: the current epoch first, then previous epochs newest-first,
+deduplicated.
+
+\begin{lstlisting}
+pub fn resolve_with_fallback(&self, shard_id: DataIndividualShardId)
+    -> Vec<IptoInstanceId>
+{
+    let mut candidates = Vec::new();
+    for map in self.placement_maps.values().rev() {
+        if let Some(target) = map.resolve(shard_id)
+            && !candidates.iter().any(|c: &IptoInstanceId| c == target)
+        {
+            candidates.push(target.clone());
+        }
+    }
+    candidates
+}
+\end{lstlisting}
+
+\subsection{Query Routing During Reconfiguration}
+
+When a placement map changes, a data item may have durable metadata on its
+previous owner while new writes go to the current owner. Queries use
+\texttt{resolve\_with\_fallback} to try the current owner first and then prior
+owners, so a reader can still find metadata written before the reconfiguration.
+As a last-resort broadcast, \texttt{all\_ipto\_instances} returns every instance
+known across all retained maps.
+
+\begin{vnote}
+Because history is bounded to five epochs, fallback only covers reconfigurations
+within that window. Long-lived data crossing more than five placement epochs
+must be rebalanced explicitly (see Section~\ref{sec:rebalancing}).
+\end{vnote}
+
+\endinput
