@@ -48,22 +48,22 @@ fn resolve_dns_srv(service: &str) -> Vec<String> {
         .args(["+short", "SRV", service])
         .output();
 
-    if let Ok(out) = output {
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut peers = Vec::new();
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let port = parts[2];
-                    let hostname = parts[3].trim_end_matches('.');
-                    let peer_id = hostname.split('.').next().unwrap_or(hostname);
-                    peers.push(format!("{}@{}:{}", peer_id, hostname, port));
-                }
+    if let Ok(out) = output
+        && out.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let mut peers = Vec::new();
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                let port = parts[2];
+                let hostname = parts[3].trim_end_matches('.');
+                let peer_id = hostname.split('.').next().unwrap_or(hostname);
+                peers.push(format!("{}@{}:{}", peer_id, hostname, port));
             }
-            if !peers.is_empty() {
-                return peers;
-            }
+        }
+        if !peers.is_empty() {
+            return peers;
         }
     }
 
@@ -102,11 +102,11 @@ fn run_server(
     let mut members = vec![me.clone()];
 
     for spec in peers {
-        if let Some((id, addr)) = parse_peer_spec(spec) {
-            if !peer_addrs.contains_key(&id) {
-                members.push(Peer::voter(id.clone(), addr));
-                peer_addrs.insert(id, addr);
-            }
+        if let Some((id, addr)) = parse_peer_spec(spec)
+            && !peer_addrs.contains_key(&id)
+        {
+            peer_addrs.entry(id.clone()).or_insert(addr);
+            members.push(Peer::voter(id, addr));
         }
     }
 
@@ -153,7 +153,6 @@ fn run_server(
         runtime_clone.run().await;
     });
 
-    let bind_addr = bind_addr;
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
@@ -178,7 +177,9 @@ fn run_server(
                         r#type: response_type_for(&envelope.r#type),
                         payload: resp_payload,
                     };
-                    if let Err(_) = graft_transport::codec::write_envelope(&mut stream, &resp).await
+                    if graft_transport::codec::write_envelope(&mut stream, &resp)
+                        .await
+                        .is_err()
                     {
                         return;
                     }
