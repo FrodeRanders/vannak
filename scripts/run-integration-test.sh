@@ -100,10 +100,10 @@ if [ "$RUN_CLUSTER" = true ]; then
 
     echo "==> Checking cluster status..."
     ALL_OK=true
-    for node in vannak-1 vannak-2 vannak-3; do
+    for node in node-1 node-2 node-3; do
         echo -n "  $node: "
         if docker compose -f "$CLUSTER_COMPOSE" exec "$node" \
-            /app/vannak-node probe localhost 10081 2>/dev/null; then
+            /app/vannak-node probe 127.0.0.1 10081 2>/dev/null; then
             echo ""
         else
             echo "(unreachable)"
@@ -118,7 +118,7 @@ if [ "$RUN_CLUSTER" = true ]; then
         echo "  Cluster healthy — all nodes responding."
     else
         echo "  Cluster degraded — dumping node logs:"
-        for node in vannak-1 vannak-2 vannak-3; do
+        for node in node-1 node-2 node-3; do
             echo "  --- $node ---"
             docker compose -f "$CLUSTER_COMPOSE" logs "$node" 2>/dev/null | tail -5
         done

@@ -231,9 +231,13 @@ fn main() {
 }
 
 fn probe_node(host: &str, port: u16) {
-    let addr = SocketAddr::from_str(&format!("{}:{}", host, port)).unwrap();
     let rt = Runtime::new().unwrap();
     rt.block_on(async move {
+        let addr = tokio::net::lookup_host(format!("{}:{}", host, port))
+            .await
+            .unwrap()
+            .next()
+            .unwrap();
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let envelope = graft_proto::Envelope {
             correlation_id: "probe-1".to_string(),
