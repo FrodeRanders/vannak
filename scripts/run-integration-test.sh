@@ -110,8 +110,8 @@ if [ "$RUN_CLUSTER" = true ]; then
     echo "==> Starting 3-node Vannak Raft cluster (port 10081)..."
     docker compose -f "$CLUSTER_COMPOSE" up -d 2>/dev/null || true
 
-    echo "==> Waiting for leader election (15s)..."
-    sleep 15
+    echo "==> Waiting for leader election (30s to accommodate CI tests)..."
+    sleep 30
 
     echo "==> Checking cluster status..."
     ALL_OK=true
