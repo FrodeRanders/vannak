@@ -154,9 +154,60 @@ vannak-node probe <host> <port>
 \end{lstlisting}
 
 \begin{vnote}
-On Linux the binary binds dual-stack (\texttt{[::]}) when given a wildcard or
-loopback host, so a single listener accepts both IPv4 and IPv6 traffic inside
-the container network.
+The binary binds the host and port exactly as given; it does not remap IPv4
+wildcards to dual-stack addresses. The Docker compose file passes
+\shellcmd{0.0.0.0 10081} for an IPv4-any bind that accepts connections from
+other containers on the default bridge network.
 \end{vnote}
+
+\subsection{Scaling Out}
+
+A single Vannak node can ingest, index, and persist metadata. When throughput
+outgrows one node, the architecture scales horizontally by running multiple
+Vannak instances against the same set of \ipto{} backends.
+
+\subsubsection{Event Partitioning}
+
+Durga process events arrive on Kafka topics. Multiple Vannak nodes form a
+consumer group, each receiving a subset of topic partitions. Within a node,
+\sitas{} routes events to shards by \texttt{process\_instance\_id}, keeping
+per-instance state reduction local and correct. No two nodes process events for
+the same process instance concurrently.
+
+\subsubsection{Idempotent Metadata Writes}
+
+Even with partitioned ingestion, multiple Vannak nodes may observe and emit
+metadata for the same data individual. Each write carries a deterministic
+correlation ID derived from the \texttt{IdempotencyKey}. The \ipto{} backend
+enforces a unique constraint on \texttt{corrid}, so repeated writes of the same
+metadata event are silently accepted --- the second write is a no-op regardless
+of which node initiated it.
+
+\subsubsection{Writer Leases}
+
+While idempotency makes concurrent writes safe, write contention across
+multiple nodes can generate unnecessary I/O. \raft{} can grant a
+\texttt{WriterLease} per \texttt{IptoInstanceId}: only the lease holder
+actively drains outbox entries to that target. Other nodes buffer their outbox
+entries locally and replay them when the lease transfers. This avoids
+contention without requiring coordination inside \ipto{}.
+
+\subsubsection{Query Scatter-Gather}
+
+A query such as ``find all failed pipelines'' fans out to every Vannak node.
+Each node returns \texttt{ProcessInstanceSnapshot} records from its shard-local
+\texttt{HotIndex}. The caller merges the partial results. No shared mutable
+state exists between nodes.
+
+Scatter-gather queries should carry explicit limits: a time range, a maximum
+result count, a per-node result cap, and a continuation token for pagination.
+
+\subsubsection{Placement During Scale-Out}
+
+When a Vannak node joins or leaves, the Raft cluster commits a new
+\texttt{IptoPlacementMap}. The placement history (see
+Section~\ref{sec:topology}) ensures queries can find metadata written under
+previous epochs. For metadata that must move, outbox segment replay delivers
+the affected shard ranges to the new target (see Section~\ref{sec:rebalancing}).
 
 \endinput
