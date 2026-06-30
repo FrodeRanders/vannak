@@ -258,38 +258,44 @@ fn main() {
 }
 
 fn probe_node(host: &str, port: u16) {
-    let addr = format!("{host}:{port}").to_socket_addrs().unwrap().next().unwrap();
+    let addr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .unwrap()
+        .next()
+        .unwrap();
     let rt = Runtime::new().unwrap();
     let result = rt.block_on(async move {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            async move {
-                let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
-                let envelope = graft_proto::Envelope {
-                    correlation_id: "probe-1".to_string(),
-                    r#type: "ClusterSummaryRequest".to_string(),
-                    payload: Vec::new(),
-                };
-                graft_transport::codec::write_envelope(&mut stream, &envelope).await.map_err(|e| e.to_string())?;
-                let mut buf = bytes::BytesMut::with_capacity(8192);
-                let resp = graft_transport::codec::read_envelope(&mut stream, &mut buf).await.map_err(|e| e.to_string())?;
-                Ok::<_, String>(resp)
-            },
-        ).await
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let mut stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|e| e.to_string())?;
+            let envelope = graft_proto::Envelope {
+                correlation_id: "probe-1".to_string(),
+                r#type: "ClusterSummaryRequest".to_string(),
+                payload: Vec::new(),
+            };
+            graft_transport::codec::write_envelope(&mut stream, &envelope)
+                .await
+                .map_err(|e| e.to_string())?;
+            let mut buf = bytes::BytesMut::with_capacity(8192);
+            let resp = graft_transport::codec::read_envelope(&mut stream, &mut buf)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(resp)
+        })
+        .await
     });
 
     match result {
-        Ok(Ok(resp)) => {
-            match ClusterSummaryResponse::decode(resp.payload.as_slice()) {
-                Ok(summary) => {
-                    println!(
-                        "node={} leader={} health={} status={}",
-                        summary.peer_id, summary.leader_id, summary.cluster_health, summary.status,
-                    );
-                }
-                Err(_) => println!("(unable to decode response)"),
+        Ok(Ok(resp)) => match ClusterSummaryResponse::decode(resp.payload.as_slice()) {
+            Ok(summary) => {
+                println!(
+                    "node={} leader={} health={} status={}",
+                    summary.peer_id, summary.leader_id, summary.cluster_health, summary.status,
+                );
             }
-        }
+            Err(_) => println!("(unable to decode response)"),
+        },
         _ => {
             eprintln!("probe: connection to {addr} timed out or failed");
             process::exit(1);
