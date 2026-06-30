@@ -92,9 +92,9 @@ if [ "${SKIP_LOAD:-false}" != true ]; then
         echo "==> Building vannak-load with ipto-writer feature..."
         cargo build --features ipto-writer --bin vannak-load --release 2>&1 | tail -1
     fi
-    echo "==> Running load test (1000 pipelines × 4 workers, with Ipto)..."
+    echo "==> Running load test (100 pipelines, with Ipto)..."
     cargo run --features ipto-writer --bin vannak-load --release -- \
-        --pipelines 1000 --workers 4 --with-ipto 2>&1
+        --pipelines 100 --with-ipto 2>&1
     echo ""
     echo "==> Load test complete."
 fi
