@@ -47,6 +47,7 @@ use vannak::process::{
     ProcessInstanceId, ProcessStatus, TenantId,
 };
 use vannak::query::{ProcessInstanceQuery, QueryLimit, EventQuery, QueryResult};
+use vannak::storage::SegmentWriter;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -414,6 +415,111 @@ fn full_ingest_index_outbox_ipto_flow() {
     eprintln!("SUCCESS: full ingest→index→outbox→Ipto flow verified");
 }
 
-// The idempotency test is covered inline in the main flow above —
-// see step 9 where duplicate payloads are rejected by the outbox.
+#[test]
+fn rebalancing_delivers_shard_range_to_new_target() {
+    if !integration_enabled() {
+        eprintln!("SKIP: VANNAK_PG_INTEGRATION not set");
+        return;
+    }
+
+    // --- 1. Connect to PostgreSQL and configure ---
+    let backend: Arc<dyn Backend> = Arc::new(PostgresBackend::new());
+    let repo = Arc::new(RepoService::new(backend));
+    let mut writer = IptoRepoWriter::new(repo.clone(), 1);
+    writer.configure_sdl().expect("SDL configuration should succeed");
+
+    // --- 2. Build payloads with different shard IDs ---
+    let data_id_1 = vannak::data::DataIndividualId::from("rebal-customer-1");
+    let data_id_2 = vannak::data::DataIndividualId::from("rebal-customer-2");
+    let shard_1 = vannak::data::DataIndividualShardId::from_data_individual(&data_id_1);
+    let shard_2 = vannak::data::DataIndividualShardId::from_data_individual(&data_id_2);
+
+    let event_1 = DataIndividualMetadataEvent::new(
+        vannak::data::MetadataEventId::from("rebal-meta-1"),
+        data_id_1,
+        shard_1,
+        TenantId::from("tenant-a"),
+        EnvironmentId::from("prod"),
+        PipelineId::from("pipeline-a"),
+        ProcessInstanceId::from("instance-a"),
+        EventTimestamp::from("2026-06-30T12:00:00Z"),
+        MetadataOperation::Received,
+    )
+    .with_passive_metadata(
+        PassiveMetadata::new()
+            .insert("vannak:dataIndividualId", MetadataValue::string("rebal-customer-1")),
+    );
+
+    let event_2 = DataIndividualMetadataEvent::new(
+        vannak::data::MetadataEventId::from("rebal-meta-2"),
+        data_id_2,
+        shard_2,
+        TenantId::from("tenant-a"),
+        EnvironmentId::from("prod"),
+        PipelineId::from("pipeline-a"),
+        ProcessInstanceId::from("instance-a"),
+        EventTimestamp::from("2026-06-30T12:00:00Z"),
+        MetadataOperation::Received,
+    )
+    .with_passive_metadata(
+        PassiveMetadata::new()
+            .insert("vannak:dataIndividualId", MetadataValue::string("rebal-customer-2")),
+    );
+
+    let mapping = IptoMapping::new("v1")
+        .map_field("vannak:dataIndividualId", "vannak:dataIndividualId");
+
+    let payload_1 = IptoWritePayload::from_event(&event_1, &IptoInstanceId::from("ipto-a"), &mapping);
+    let payload_2 = IptoWritePayload::from_event(&event_2, &IptoInstanceId::from("ipto-a"), &mapping);
+
+    assert_ne!(payload_1.shard_id, payload_2.shard_id,
+        "different data individuals should produce different shard IDs");
+
+    // --- 3. Write both payloads to a segment ---
+    let path = std::env::temp_dir().join(format!(
+        "vannak-rebal-test-{}.seg",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut seg_writer = SegmentWriter::create(
+        &path,
+        vannak::storage::SegmentId::from("rebal-seg"),
+        vannak::cluster::NodeId::from("node-a"),
+    )
+    .unwrap();
+    seg_writer.append_record(&payload_1.encode()).unwrap();
+    seg_writer.append_record(&payload_2.encode()).unwrap();
+    seg_writer.seal().unwrap();
+
+    // --- 4. Rebalance only shard_1's range ---
+    let lower = shard_1;
+    let upper = shard_1; // only shard_1, not shard_2
+    let summary = vannak::ipto::rebalance_shard_range_to(
+        &path,
+        lower,
+        upper,
+        &mut writer,
+        10,
+    )
+    .unwrap();
+
+    assert_eq!(summary.entries_found, 1, "only payload_1 should match");
+    assert_eq!(summary.acknowledged, 1);
+    assert_eq!(summary.failed, 0);
+
+    // --- 5. Verify payload_1 was persisted, payload_2 was not ---
+    // Look up payload_1 via search
+    let search_1 = repo.search_units(
+        serde_json::json!({"tenantid": 1, "status": 30}),
+        ipto_rust::model::SearchOrder { field: "created".to_string(), descending: true },
+        ipto_rust::model::SearchPaging { limit: 20, offset: 0 },
+    ).unwrap();
+    assert!(search_1.total_hits >= 1, "payload_1 should be persisted");
+
+    // Clean up
+    std::fs::remove_file(path).unwrap();
+    eprintln!("SUCCESS: rebalancing delivers shard range to new target");
+}
 

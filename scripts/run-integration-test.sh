@@ -66,7 +66,7 @@ fi
 echo "==> Running Vannak integration test..."
 export VANNAK_PG_INTEGRATION=1
 
-cargo test --features ipto-writer --test vannak_integration -- --nocapture 2>&1
+cargo test --features ipto-writer --test vannak_integration -- --test-threads=1 --nocapture 2>&1
 
 echo ""
 echo "==> Integration test complete."

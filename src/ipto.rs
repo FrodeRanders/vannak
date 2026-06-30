@@ -745,6 +745,43 @@ pub fn replay_metadata_outbox_segment_for_shard_range(
     Ok(outbox)
 }
 
+/// Rebalance a shard range from one or more outbox segments to a new Ipto
+/// target.
+///
+/// Replays the segment, extracting entries whose `shard_id` falls within
+/// `[start, end]`, then drains the resulting pending entries through the
+/// given writer. The writer must be connected to the new Ipto instance.
+///
+/// Idempotent: if some entries already exist on the target (e.g. from a
+/// previous partial rebalance), they are skipped via correlation-id lookup.
+///
+/// Returns a summary of how many entries were attempted and acknowledged.
+pub fn rebalance_shard_range_to(
+    segment_path: impl AsRef<Path>,
+    start: DataIndividualShardId,
+    end: DataIndividualShardId,
+    writer: &mut impl IptoWriter,
+    max_attempts: usize,
+) -> Result<MetadataOutboxRebalanceSummary, MetadataOutboxStorageError> {
+    let mut pending = replay_metadata_outbox_segment_for_shard_range(segment_path, start, end)?;
+    let drain = drain_pending_outbox(&mut pending, writer, max_attempts);
+    Ok(MetadataOutboxRebalanceSummary {
+        entries_found: pending.len(),
+        attempted: drain.attempted,
+        acknowledged: drain.acknowledged,
+        failed: drain.failed,
+    })
+}
+
+/// Summary of a shard-range rebalancing operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataOutboxRebalanceSummary {
+    pub entries_found: usize,
+    pub attempted: usize,
+    pub acknowledged: usize,
+    pub failed: usize,
+}
+
 #[derive(Debug)]
 pub struct MetadataOutboxReplay {
     pub outbox: MetadataOutbox,
@@ -1245,6 +1282,44 @@ mod tests {
             replayed.next_pending().unwrap().payload().shard_id,
             DataIndividualShardId(42)
         );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn rebalance_shard_range_to_delivers_only_matching_entries() {
+        use crate::storage::{SegmentId, SegmentWriter};
+
+        let path = temp_segment_path("rebalance");
+        let mut seg_writer =
+            SegmentWriter::create(&path, SegmentId::from("rebal-seg"), NodeId::from("node-a"))
+                .unwrap();
+
+        let in_range = sample_payload();
+        let mut out_of_range = sample_payload();
+        out_of_range.idempotency_key = IdempotencyKey::from("other:event");
+        out_of_range.shard_id = DataIndividualShardId(999);
+
+        seg_writer.append_record(&in_range.encode()).unwrap();
+        seg_writer.append_record(&out_of_range.encode()).unwrap();
+        seg_writer.seal().unwrap();
+
+        let mut writer = RecordingWriter::default();
+
+        let summary = rebalance_shard_range_to(
+            &path,
+            DataIndividualShardId(0),
+            DataIndividualShardId(100),
+            &mut writer,
+            10,
+        )
+        .unwrap();
+
+        assert_eq!(summary.entries_found, 1);
+        assert_eq!(summary.acknowledged, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(writer.written.len(), 1);
+        assert_eq!(writer.written[0].shard_id, DataIndividualShardId(42));
 
         fs::remove_file(path).unwrap();
     }
