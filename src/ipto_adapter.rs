@@ -134,49 +134,42 @@ impl IptoRepoWriter {
             return Ok(());
         }
 
-        let attributes: &[(&str, &str, &str, bool)] = &[
-            ("prov_generatedAtTime", "prov:generatedAtTime", "time", false),
-            ("prov_startedAtTime", "prov:startedAtTime", "time", false),
-            ("prov_endedAtTime", "prov:endedAtTime", "time", false),
-            ("prov_invalidatedAtTime", "prov:invalidatedAtTime", "time", false),
-            ("prov_wasAttributedTo", "prov:wasAttributedTo", "string", false),
-            ("prov_value", "prov:value", "string", false),
-            ("prov_location", "prov:location", "string", false),
-            ("prov_type", "prov:type", "string", false),
-            ("rdfs_label", "rdfs:label", "string", false),
-            ("rdfs_comment", "rdfs:comment", "string", false),
-            ("vannak_data_individual", "vannak:dataIndividualId", "string", false),
-            ("vannak_process_instance", "vannak:processInstanceId", "string", false),
-            ("vannak_activity_id", "vannak:activityId", "string", false),
-            ("vannak_pipeline_id", "vannak:pipelineId", "string", false),
-            ("vannak_tenant_id", "vannak:tenantId", "string", false),
-            ("vannak_environment_id", "vannak:environmentId", "string", false),
+        self.repo
+            .configure_graphql_sdl(PROV_O_SDL)
+            .map_err(|e| IptoWriteError::retryable(format!("SDL configuration failed: {e}")))?;
+
+        let attribute_names = [
+            ("prov:generatedAtTime", "time"),
+            ("prov:startedAtTime", "time"),
+            ("prov:endedAtTime", "time"),
+            ("prov:invalidatedAtTime", "time"),
+            ("prov:wasAttributedTo", "string"),
+            ("prov:value", "string"),
+            ("prov:location", "string"),
+            ("prov:type", "string"),
+            ("rdfs:label", "string"),
+            ("rdfs:comment", "string"),
+            ("vannak:dataIndividualId", "string"),
+            ("vannak:processInstanceId", "string"),
+            ("vannak:activityId", "string"),
+            ("vannak:pipelineId", "string"),
+            ("vannak:tenantId", "string"),
+            ("vannak:environmentId", "string"),
         ];
 
-        for (alias, qualname, attr_type, is_array) in attributes {
-            if self
-                .repo
-                .attribute_name_to_id(qualname)
-                .map_err(|e| IptoWriteError::retryable(format!("lookup failed: {e}")))?
-                .is_none()
-            {
-                self.repo
-                    .create_attribute(alias, qualname, qualname, attr_type, *is_array)
-                    .map_err(|e| {
-                        IptoWriteError::retryable(format!("create attribute {qualname} failed: {e}"))
-                    })?;
-            }
-
+        for (qualname, attr_type) in attribute_names {
             let id = self
                 .repo
                 .attribute_name_to_id(qualname)
                 .map_err(|e| IptoWriteError::retryable(format!("id lookup for {qualname}: {e}")))?
                 .ok_or_else(|| {
-                    IptoWriteError::permanent(format!("attribute {qualname} not found after create"))
+                    IptoWriteError::permanent(format!(
+                        "attribute {qualname} not found after SDL configuration"
+                    ))
                 })?;
 
             self.attr_ids.insert(
-                IptoAttributeName::from(*qualname),
+                IptoAttributeName::from(qualname),
                 (id, attr_type.to_string()),
             );
         }
@@ -254,7 +247,6 @@ impl IptoRepoWriter {
 
         let unit = serde_json::json!({
             "tenantid": self.tenant_id,
-            "unitname": format!("vannak:{}", payload.idempotency_key.as_str()),
             "corrid": corrid,
             "status": 30,
             "attributes": attributes,
