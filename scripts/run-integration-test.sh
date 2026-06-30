@@ -4,7 +4,13 @@
 #
 # Starts infrastructure and runs integration tests. By default, runs the
 # PostgreSQL/Ipto ingest→index→outbox→writer flow. With --cluster, also
-# starts a 3-node vannak-node Raft cluster with DNS auto-discovery.
+# starts a 3-node vannak-node Raft cluster.
+#
+# The cluster uses explicit container-name peers (vannak-N@vannak-N:10081)
+# resolved via Docker's built-in DNS. DNS SRV discovery (--srv flag) is
+# available in the binary for production Kubernetes headless-service
+# deployments but is not exercised here due to Docker bridge networking
+# issues in CI environments.
 #
 # Usage:
 #   ./scripts/run-integration-test.sh               # PostgreSQL + Ipto writer
