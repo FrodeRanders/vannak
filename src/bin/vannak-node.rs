@@ -107,7 +107,15 @@ fn run_server(
     peers: &[String],
 ) -> Result<(), String> {
     let bind_addr = listen_addr(host, port);
-    let me = Peer::voter(peer_id.to_string(), bind_addr);
+
+    // Resolve our own address for the Raft peer identity (can't use 0.0.0.0).
+    let peer_addr = format!("{peer_id}.vannak.local:{port}")
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
+        .unwrap_or(bind_addr);
+
+    let me = Peer::voter(peer_id.to_string(), peer_addr);
 
     let mut peer_addrs: HashMap<String, SocketAddr> = HashMap::new();
     let mut members = vec![me.clone()];
