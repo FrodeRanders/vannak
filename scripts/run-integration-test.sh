@@ -112,7 +112,7 @@ if [ "$RUN_CLUSTER" = true ]; then
     done
 
     RUNNING=$(docker compose -f "$CLUSTER_COMPOSE" ps --status running -q 2>/dev/null | wc -l | tr -d ' ')
-    echo "  Running containers: $RUNNING (expected 4: dns + 3 nodes)"
+    echo "  Cluster containers running: $RUNNING"
 
     if [ "$ALL_OK" = true ]; then
         echo "  Cluster healthy — all nodes responding."
