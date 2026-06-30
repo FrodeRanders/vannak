@@ -35,3 +35,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 default = []
 ipto-writer = ["dep:ipto_rust", "dep:serde_json", "dep:uuid"]
 raft = ["dep:graft-core", "dep:serde", "dep:serde_json"]
+
+[[test]]
+name = "vannak_integration"
+required-features = ["ipto-writer"]

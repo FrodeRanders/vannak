@@ -1,0 +1,29 @@
+# Docker Compose for Vannak integration tests.
+#
+# Starts a PostgreSQL instance with the Ipto schema and stored
+# procedures. The Vannak integration test connects to this and
+# exercises the full ingest → index → outbox → Ipto writer flow.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   VANNAK_PG_INTEGRATION=1 cargo test --test vannak_integration
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: vannak-test-pg
+    environment:
+      POSTGRES_USER: repo
+      POSTGRES_PASSWORD: repo
+      POSTGRES_DB: repo
+    ports:
+      - "${VANNAK_PG_PORT:-5432}:5432"
+    volumes:
+      - ../ipto/shared/db/postgresql/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
+      - ../ipto/shared/db/postgresql/procedures.sql:/docker-entrypoint-initdb.d/01_procedures.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repo -d repo"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
