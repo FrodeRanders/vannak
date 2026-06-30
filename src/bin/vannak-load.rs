@@ -436,6 +436,7 @@ fn main() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_single_threaded(
     pipelines: u64,
     proc_events_per: u64,
@@ -531,6 +532,7 @@ fn run_single_threaded(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_multi_threaded(
     pipelines: u64,
     proc_events_per: u64,
