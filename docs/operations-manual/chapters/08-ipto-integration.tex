@@ -148,6 +148,31 @@ example PROV-O \texttt{wasDerivedFrom} edges linking successive operations on
 the same data individual) are not yet emitted; the data-individual id attribute
 provides the join key for assembling them in queries.
 
+\subsection{External Associations}
+
+In addition to binary unit-to-unit relations, \ipto{} supports \textit{external
+associations}: typed links from a unit to an external string identifier, stored
+in \texttt{repo\_external\_assoc} as \texttt{(tenantid, unitid, assoctype,
+assocstring)}. These are the natural mechanism for linking an \ipto{} provenance
+unit to a Vannak \texttt{DataIndividualId}.
+
+\begin{longtable}{lr}
+\hline
+Symbol & ID \\
+\hline
+\texttt{REFERS\_TO}      & 10 \\
+\texttt{SIGNED\_BY}      & 11 \\
+\texttt{VERIFIED\_BY}    & 12 \\
+\texttt{MIGRATED\_FROM}  & 13 \\
+\texttt{DERIVED\_FROM}   & 14 \\
+\texttt{PRODUCED\_BY}    & 15 \\
+\hline
+\end{longtable}
+
+Each attribute payload already carries \texttt{vannak:dataIndividualId}, so
+creating an association is a single additional \texttt{add\_association()} call
+per written unit.
+
 \subsection{Backend Connectivity}
 
 \texttt{PostgresBackend::new} reads the \texttt{IPTO\_PG\_*} environment
