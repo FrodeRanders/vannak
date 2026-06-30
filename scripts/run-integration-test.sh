@@ -46,9 +46,10 @@ fi
 trap compose_down EXIT
 
 # ---------------------------------------------------------------------------
-# Start PostgreSQL
+# Start PostgreSQL (fresh each time)
 # ---------------------------------------------------------------------------
-echo "==> Starting PostgreSQL (port $VANNAK_PG_PORT)..."
+echo "==> Starting fresh PostgreSQL (port $VANNAK_PG_PORT)..."
+docker compose -f "$PROJECT_DIR/docker-compose.test.yml" down -v 2>/dev/null || true
 docker compose -f "$PROJECT_DIR/docker-compose.test.yml" up -d --wait postgres
 
 # ---------------------------------------------------------------------------
@@ -56,7 +57,7 @@ docker compose -f "$PROJECT_DIR/docker-compose.test.yml" up -d --wait postgres
 # ---------------------------------------------------------------------------
 if [ "$NO_BUILD" = false ]; then
     echo "==> Building Vannak with ipto-writer feature..."
-    cargo build --features ipto-writer 2>&1 | tail -1
+    cargo test --features ipto-writer --test vannak_integration --no-run 2>&1 | tail -1
 fi
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ fi
 echo "==> Running Vannak integration test..."
 export VANNAK_PG_INTEGRATION=1
 
-cargo test --test vannak_integration -- --nocapture 2>&1
+cargo test --features ipto-writer --test vannak_integration -- --nocapture 2>&1
 
 echo ""
 echo "==> Integration test complete."

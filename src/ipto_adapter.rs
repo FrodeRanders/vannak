@@ -102,7 +102,7 @@ type ProvEntity @template(name: \"ProvEntity\") {
 pub struct IptoRepoWriter {
     repo: Arc<RepoService>,
     tenant_id: i64,
-    attr_ids: HashMap<IptoAttributeName, i64>,
+    attr_ids: HashMap<IptoAttributeName, (i64, String)>,
     sdl_configured: bool,
 }
 
@@ -126,39 +126,59 @@ impl IptoRepoWriter {
     /// definitions and unit/record templates into the Ipto backend.
     /// Subsequently calls resolve attribute names to their numeric IDs
     /// for efficient payload construction.
+    ///
+    /// Safe to call multiple times — subsequent calls are no-ops if SDL
+    /// has already been configured.
     pub fn configure_sdl(&mut self) -> Result<(), IptoWriteError> {
-        self.repo
-            .configure_graphql_sdl(PROV_O_SDL)
-            .map_err(|e| IptoWriteError::retryable(format!("SDL configuration failed: {e}")))?;
+        if self.sdl_configured {
+            return Ok(());
+        }
 
-        let attribute_names = [
-            "prov:generatedAtTime",
-            "prov:startedAtTime",
-            "prov:endedAtTime",
-            "prov:invalidatedAtTime",
-            "prov:wasAttributedTo",
-            "prov:value",
-            "prov:location",
-            "prov:type",
-            "rdfs:label",
-            "rdfs:comment",
-            "vannak:dataIndividualId",
-            "vannak:processInstanceId",
-            "vannak:activityId",
-            "vannak:pipelineId",
-            "vannak:tenantId",
-            "vannak:environmentId",
+        let attributes: &[(&str, &str, &str, bool)] = &[
+            ("prov_generatedAtTime", "prov:generatedAtTime", "time", false),
+            ("prov_startedAtTime", "prov:startedAtTime", "time", false),
+            ("prov_endedAtTime", "prov:endedAtTime", "time", false),
+            ("prov_invalidatedAtTime", "prov:invalidatedAtTime", "time", false),
+            ("prov_wasAttributedTo", "prov:wasAttributedTo", "string", false),
+            ("prov_value", "prov:value", "string", false),
+            ("prov_location", "prov:location", "string", false),
+            ("prov_type", "prov:type", "string", false),
+            ("rdfs_label", "rdfs:label", "string", false),
+            ("rdfs_comment", "rdfs:comment", "string", false),
+            ("vannak_data_individual", "vannak:dataIndividualId", "string", false),
+            ("vannak_process_instance", "vannak:processInstanceId", "string", false),
+            ("vannak_activity_id", "vannak:activityId", "string", false),
+            ("vannak_pipeline_id", "vannak:pipelineId", "string", false),
+            ("vannak_tenant_id", "vannak:tenantId", "string", false),
+            ("vannak_environment_id", "vannak:environmentId", "string", false),
         ];
 
-        for name in &attribute_names {
-            if let Some(id) = self
+        for (alias, qualname, attr_type, is_array) in attributes {
+            if self
                 .repo
-                .attribute_name_to_id(name)
-                .map_err(|e| IptoWriteError::retryable(format!("attribute lookup failed: {e}")))?
+                .attribute_name_to_id(qualname)
+                .map_err(|e| IptoWriteError::retryable(format!("lookup failed: {e}")))?
+                .is_none()
             {
-                self.attr_ids
-                    .insert(IptoAttributeName::from(*name), id);
+                self.repo
+                    .create_attribute(alias, qualname, qualname, attr_type, *is_array)
+                    .map_err(|e| {
+                        IptoWriteError::retryable(format!("create attribute {qualname} failed: {e}"))
+                    })?;
             }
+
+            let id = self
+                .repo
+                .attribute_name_to_id(qualname)
+                .map_err(|e| IptoWriteError::retryable(format!("id lookup for {qualname}: {e}")))?
+                .ok_or_else(|| {
+                    IptoWriteError::permanent(format!("attribute {qualname} not found after create"))
+                })?;
+
+            self.attr_ids.insert(
+                IptoAttributeName::from(*qualname),
+                (id, attr_type.to_string()),
+            );
         }
 
         self.sdl_configured = true;
@@ -193,11 +213,15 @@ impl IptoRepoWriter {
 
     fn metadata_value_to_json(&self, value: &MetadataValue) -> Value {
         match value {
-            MetadataValue::String(s) => Value::String(s.clone()),
-            MetadataValue::Integer(i) => serde_json::json!(*i),
-            MetadataValue::Boolean(b) => Value::Bool(*b),
-            MetadataValue::Timestamp(t) => Value::String(t.as_str().to_string()),
-            MetadataValue::StringList(v) => Value::Array(v.iter().map(|s| Value::String(s.clone())).collect()),
+            MetadataValue::String(s) => Value::Array(vec![Value::String(s.clone())]),
+            MetadataValue::Integer(i) => serde_json::json!([i]),
+            MetadataValue::Boolean(b) => Value::Array(vec![Value::Bool(*b)]),
+            MetadataValue::Timestamp(t) => {
+                Value::Array(vec![Value::String(t.as_str().to_string())])
+            }
+            MetadataValue::StringList(v) => {
+                Value::Array(v.iter().map(|s| Value::String(s.clone())).collect())
+            }
         }
     }
 
@@ -209,9 +233,20 @@ impl IptoRepoWriter {
 
         let mut attributes: Vec<Value> = Vec::new();
         for (attr_name, value) in &payload.attributes {
-            if let Some(&attr_id) = self.attr_ids.get(attr_name) {
+            if let Some(&(attr_id, ref attr_type)) = self.attr_ids.get(attr_name) {
+                let attr_type_num = match attr_type.as_str() {
+                    "string" => 1,
+                    "time" | "instant" | "timestamp" | "datetime" => 2,
+                    "int" | "integer" => 3,
+                    "long" => 4,
+                    "double" | "float" => 5,
+                    "bool" | "boolean" => 6,
+                    "data" | "bytes" | "blob" => 7,
+                    _ => 1,
+                };
                 attributes.push(serde_json::json!({
                     "attrid": attr_id,
+                    "attrtype": attr_type_num,
                     "value": self.metadata_value_to_json(value),
                 }));
             }
@@ -219,8 +254,9 @@ impl IptoRepoWriter {
 
         let unit = serde_json::json!({
             "tenantid": self.tenant_id,
+            "unitname": format!("vannak:{}", payload.idempotency_key.as_str()),
             "corrid": corrid,
-            "status": 30, // EFFECTIVE
+            "status": 30,
             "attributes": attributes,
         });
 
@@ -306,7 +342,7 @@ mod tests {
 
         writer
             .attr_ids
-            .insert(IptoAttributeName::from("rdfs:label"), 10);
+            .insert(IptoAttributeName::from("rdfs:label"), (10, "1".into()));
 
         let payload = IptoWritePayload {
             target: crate::ipto::IptoInstanceId::from("ignored"),
@@ -326,6 +362,7 @@ mod tests {
         let attrs = unit["attributes"].as_array().unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0]["attrid"], 10);
-        assert_eq!(attrs[0]["value"], "test-label");
+        assert_eq!(attrs[0]["attrtype"], 1);
+        assert_eq!(attrs[0]["value"][0], "test-label");
     }
 }
