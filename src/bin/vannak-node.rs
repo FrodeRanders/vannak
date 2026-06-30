@@ -36,11 +36,11 @@ use graft_core::state_machine::StateMachine;
 use graft_core::types::Peer;
 use graft_proto::raft::ClusterSummaryResponse;
 use graft_runtime::handlers::RaftHandler;
-use prost::Message;
 use graft_runtime::runtime::RaftRuntime;
 use graft_storage::log_store::FileLogStore;
 use graft_storage::state_store::FilePersistentStateStore;
 use graft_transport::client::RaftClient;
+use prost::Message;
 use tokio::runtime::Runtime;
 
 use vannak::raft_sm::ClusterStateMachine;
@@ -253,11 +253,9 @@ fn probe_node(host: &str, port: u16) {
         if let Ok(resp) = graft_transport::codec::read_envelope(&mut stream, &mut buf).await {
             match ClusterSummaryResponse::decode(resp.payload.as_slice()) {
                 Ok(summary) => {
-                    println!("node={} leader={} health={} status={}",
-                        summary.peer_id,
-                        summary.leader_id,
-                        summary.cluster_health,
-                        summary.status,
+                    println!(
+                        "node={} leader={} health={} status={}",
+                        summary.peer_id, summary.leader_id, summary.cluster_health, summary.status,
                     );
                 }
                 Err(_) => {
