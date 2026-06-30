@@ -387,17 +387,130 @@ storage pressure or query latency patterns justify it.
 | `MetadataOutboxCheckpoint` | `cluster.rs` | Per-shard, per-target acknowledged offset. Enables outbox replay for recovery or migration. |
 | `ClusterControlState` | `cluster.rs` | Reducer for Raft-committed cluster commands. Would gain placement map history. |
 
-## 8. Open Questions
+## 8. Rebalancing via Shard-Aware Segment Replay (Implemented)
 
-- How large should the placement history window be? 3 epochs? 5? The answer
-  depends on reconfiguration frequency vs. acceptable broadcast fallback rate.
-- Should the broadcast fallback be a separate query primitive, or should the
-  `resolve_with_fallback` method always include all known instances as a final
-  step?
-- When an Ipto instance is permanently removed (decommissioned), how long is
-  its data retained before the outbox replay obligation is discharged? A
-  retention policy tied to `SegmentManifest` age may be appropriate.
-- Does Vannak need a "data placement health" metric that reports how many
-  shard IDs are served by non-current instances (i.e., migration debt)?
-- Should `resolve_with_fallback` be part of `ClusterControlState` (cluster
-  concern) or part of the query layer (operational concern)?
+The fallback approach handles queries during reconfiguration. But for
+long-lived clusters with many reconfigurations, data accumulates on old
+instances and broadcast fallback becomes more frequent. Targeted rebalancing
+addresses this without full-segment replay.
+
+### 8.1 Key Enabler: `shard_id` on `IptoWritePayload`
+
+The outbox payload now carries `DataIndividualShardId`. This means every
+segment record knows which shard it belongs to. The binary codec includes
+`shard_id` as a `u64` after the target string.
+
+```rust
+pub struct IptoWritePayload {
+    pub target: IptoInstanceId,
+    pub shard_id: DataIndividualShardId,   // <-- added
+    pub idempotency_key: IdempotencyKey,
+    pub mapping_version: String,
+    pub attributes: BTreeMap<IptoAttributeName, MetadataValue>,
+}
+```
+
+### 8.2 Shard-Range Segment Replay
+
+```rust
+pub fn replay_metadata_outbox_segment_for_shard_range(
+    path: impl AsRef<Path>,
+    start: DataIndividualShardId,
+    end: DataIndividualShardId,
+) -> Result<MetadataOutbox, MetadataOutboxStorageError>
+```
+
+This replays an outbox segment, extracting only the entries whose `shard_id`
+falls within `[start, end]`. The returned `MetadataOutbox` contains only the
+matching pending entries — ready for delivery through a writer connected to
+the new Ipto instance.
+
+### 8.3 Rebalancing Flow
+
+When a placement map change moves shard range `[S..E]` from instance A to
+instance B:
+
+1. **Raft commits the new placement map** — all nodes agree shards `[S..E]`
+   now belong to B. New writes go to B.
+
+2. **Extract affected entries.** For each sealed or open outbox segment:
+   ```rust
+   let pending = replay_metadata_outbox_segment_for_shard_range(
+       segment_path, shard_start, shard_end,
+   )?;
+   ```
+
+3. **Deliver to new target.** Drain the pending entries through an
+   `IptoWriter` connected to instance B:
+   ```rust
+   let mut writer = IptoRepoWriter::new(repo_for_b, tenant_id);
+   drain_pending_outbox(&mut pending, &mut writer, /* max_attempts */ 100);
+   ```
+
+4. **Idempotency handles safety.** Since each payload carries an
+   `idempotency_key` and the writer checks `get_unit_by_corrid_json()`
+   before writing, re-delivering the same payload is safe. The new instance
+   ignores duplicates.
+
+5. **Record rebalancing progress.** After draining, record a
+   `MetadataOutboxCheckpoint` for the new target with the last acknowledged
+   offset. This ensures restart after partial rebalancing picks up where it
+   left off.
+
+6. **Archive old data (optional).** Once rebalancing is confirmed and the
+   new instance has all data, the old instance can archive or drop the
+   migrated shard range. A `RetentionPolicy` in the Raft state can authorize
+   this.
+
+### 8.4 Advantages Over Full-Segment Replay
+
+| Approach | Replay scope | Network cost |
+|---|---|---|
+| Full-segment replay | All entries | ~segment size |
+| Shard-range replay | Only affected shards | ~(segment size / instance count) |
+
+With the shard-aware codec, rebalancing reads the same segment but filters
+in-memory — matching entries are enqueued, non-matching entries are skipped.
+The segment is not rewritten.
+
+### 8.5 When to Rebalance
+
+Rebalancing is optional, not required. The query fallback approach (section
+4.1) handles reconfiguration without data movement. Rebalancing becomes
+worthwhile when:
+
+- Storage pressure: an instance accumulates data from shards it no longer
+  owns.
+- Query latency: broadcast fallback hits too many instances for frequently-
+  queried data.
+- Instance decommissioning: an instance being removed permanently needs its
+  data moved before shutdown.
+
+### 8.6 What's Not Implemented (Yet)
+
+- **Automatic rebalancing trigger.** Currently manual — an operator or a
+  cluster management task initiates replay.
+- **Rebalancing progress tracking in Raft.** No `RebalancingStatus` command
+  yet. Partial rebalancing restarts from the outbox checkpoint offset.
+- **Retention policy for archived shards.** The old instance keeps data
+  indefinitely unless manually cleaned up.
+- **Cross-segment rebalancing.** The replay function works on one segment at
+  a time. A bulk rebalancing task would iterate over all relevant segments.
+
+## 9. Open Questions
+
+- **Placement history window:** _Resolved — 5 epochs, bounded in
+  `ClusterControlState` with automatic pruning._
+- **Broadcast fallback:** _Resolved — `resolve_with_fallback` returns an
+  ordered Vec of candidates. Broadcast (`all_ipto_instances()`) is a
+  separate explicit call for the last-resort case._
+- When permanently removing an Ipto instance, rebalancing via shard-range
+  replay can move data first. Retention policy for archived shards is
+  still future work.
+- Should rebalancing be automatic (triggered by placement map change) or
+  operator-initiated?
+- What granularity should rebalancing progress tracking have? Per-segment?
+  Per-shard-range? The outbox checkpoint offset per (shard, target) is the
+  existing pattern.
+- Should `IptoWritePayload.shard_id` be validated on ingest against the
+  derived `DataIndividualShardId` from `DataIndividualId`?
