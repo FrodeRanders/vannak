@@ -33,8 +33,8 @@
 //! The test runs entirely in-process — no network IO except when
 //! --with-ipto is set and a PostgreSQL instance is available.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use vannak::data::{
@@ -54,11 +54,8 @@ use vannak::process::{
 
 #[cfg(feature = "ipto-writer")]
 use {
-    ipto_rust::backend::Backend,
-    ipto_rust::backends::postgres::PostgresBackend,
-    ipto_rust::repo::RepoService,
-    std::sync::Mutex,
-    vannak::ipto_adapter::IptoRepoWriter,
+    ipto_rust::backend::Backend, ipto_rust::backends::postgres::PostgresBackend,
+    ipto_rust::repo::RepoService, std::sync::Mutex, vannak::ipto_adapter::IptoRepoWriter,
 };
 
 // ---------------------------------------------------------------------------
@@ -88,20 +85,18 @@ fn make_process_events(instance: &ProcessInstanceId, pipeline: &PipelineId) -> V
     let mut events = Vec::with_capacity(8);
 
     // Process start
-    events.push(
-        PipelineEvent::new(
-            EventId::from(format!("evt-start-{}", instance.as_str())),
-            source.clone(),
-            SourceSequence(0),
-            tenant.clone(),
-            env.clone(),
-            pipeline.clone(),
-            definition.clone(),
-            instance.clone(),
-            EventTimestamp::from(format_ts(base_ts)),
-            EventKind::ProcessStarted,
-        ),
-    );
+    events.push(PipelineEvent::new(
+        EventId::from(format!("evt-start-{}", instance.as_str())),
+        source.clone(),
+        SourceSequence(0),
+        tenant.clone(),
+        env.clone(),
+        pipeline.clone(),
+        definition.clone(),
+        instance.clone(),
+        EventTimestamp::from(format_ts(base_ts)),
+        EventKind::ProcessStarted,
+    ));
 
     // For each activity: entered + completed
     for (idx, activity) in activities.iter().enumerate() {
@@ -139,20 +134,18 @@ fn make_process_events(instance: &ProcessInstanceId, pipeline: &PipelineId) -> V
     }
 
     // Process complete
-    events.push(
-        PipelineEvent::new(
-            EventId::from(format!("evt-end-{}", instance.as_str())),
-            source,
-            SourceSequence(8),
-            tenant,
-            env,
-            pipeline.clone(),
-            definition,
-            instance.clone(),
-            EventTimestamp::from(format_ts(base_ts + 4500)),
-            EventKind::ProcessCompleted,
-        ),
-    );
+    events.push(PipelineEvent::new(
+        EventId::from(format!("evt-end-{}", instance.as_str())),
+        source,
+        SourceSequence(8),
+        tenant,
+        env,
+        pipeline.clone(),
+        definition,
+        instance.clone(),
+        EventTimestamp::from(format_ts(base_ts + 4500)),
+        EventKind::ProcessCompleted,
+    ));
 
     events
 }
@@ -183,9 +176,18 @@ fn make_metadata_events(
         )
         .with_passive_metadata(
             PassiveMetadata::new()
-                .insert("vannak:dataIndividualId", MetadataValue::string(data_id.as_str()))
-                .insert("vannak:pipelineId", MetadataValue::string(pipeline.as_str()))
-                .insert("vannak:processInstanceId", MetadataValue::string(instance.as_str()))
+                .insert(
+                    "vannak:dataIndividualId",
+                    MetadataValue::string(data_id.as_str()),
+                )
+                .insert(
+                    "vannak:pipelineId",
+                    MetadataValue::string(pipeline.as_str()),
+                )
+                .insert(
+                    "vannak:processInstanceId",
+                    MetadataValue::string(instance.as_str()),
+                )
                 .insert("vannak:tenantId", MetadataValue::string("load-test"))
                 .insert("vannak:environmentId", MetadataValue::string("perf")),
         ),
@@ -238,8 +240,7 @@ fn make_metadata_events(
         )
         .with_activity_id(ActivityId::from("enrich_data"))
         .with_active_metadata(
-            ActiveMetadata::new()
-                .insert("vannak:activityId", MetadataValue::string("enrich_data")),
+            ActiveMetadata::new().insert("vannak:activityId", MetadataValue::string("enrich_data")),
         ),
     ]
 }
@@ -290,18 +291,9 @@ impl Stats {
         println!("  Metadata events:    {}", me);
         println!("  Total events:       {}", pe + me);
         println!("  ───────────────────────────────────────");
-        println!(
-            "  Process evt/sec:   {:.0}",
-            pe as f64 / elapsed
-        );
-        println!(
-            "  Metadata evt/sec:  {:.0}",
-            me as f64 / elapsed
-        );
-        println!(
-            "  Total evt/sec:     {:.0}",
-            (pe + me) as f64 / elapsed
-        );
+        println!("  Process evt/sec:   {:.0}", pe as f64 / elapsed);
+        println!("  Metadata evt/sec:  {:.0}", me as f64 / elapsed);
+        println!("  Total evt/sec:     {:.0}", (pe + me) as f64 / elapsed);
         if pe > 0 {
             println!(
                 "  Index ingest avg:  {:.1} µs",
@@ -400,7 +392,9 @@ fn main() {
 
     #[cfg(not(feature = "ipto-writer"))]
     if with_ipto {
-        eprintln!("  WARNING: --with-ipto requires ipto-writer feature. Build with --features ipto-writer.");
+        eprintln!(
+            "  WARNING: --with-ipto requires ipto-writer feature. Build with --features ipto-writer."
+        );
     }
 
     let start = Instant::now();
@@ -491,8 +485,11 @@ fn run_single_threaded(
                 .map_field("vannak:activityId", "vannak:activityId");
 
             for event in events {
-                let payload =
-                    IptoWritePayload::from_event(&event, &IptoInstanceId::from("load-test"), &mapping);
+                let payload = IptoWritePayload::from_event(
+                    &event,
+                    &IptoInstanceId::from("load-test"),
+                    &mapping,
+                );
 
                 #[cfg(feature = "ipto-writer")]
                 outbox.enqueue(payload);
