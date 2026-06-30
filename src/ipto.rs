@@ -127,6 +127,7 @@ impl IptoMapping {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IptoWritePayload {
     pub target: IptoInstanceId,
+    pub shard_id: DataIndividualShardId,
     pub idempotency_key: IdempotencyKey,
     pub mapping_version: String,
     pub attributes: BTreeMap<IptoAttributeName, MetadataValue>,
@@ -152,6 +153,7 @@ impl IptoWritePayload {
 
         Self {
             target: target.clone(),
+            shard_id: event.data_individual_shard_id(),
             idempotency_key: event.idempotency_key().clone(),
             mapping_version: mapping.version().to_string(),
             attributes,
@@ -166,6 +168,7 @@ impl IptoWritePayload {
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         write_string(&mut out, self.target.as_str());
+        write_u64(&mut out, self.shard_id.0);
         write_string(&mut out, self.idempotency_key.as_str());
         write_string(&mut out, &self.mapping_version);
         write_u32(&mut out, self.attributes.len() as u32);
@@ -179,6 +182,7 @@ impl IptoWritePayload {
     pub fn decode(bytes: &[u8]) -> Result<Self, IptoPayloadDecodeError> {
         let mut cursor = DecodeCursor::new(bytes);
         let target = IptoInstanceId::from(cursor.read_string()?);
+        let shard_id = DataIndividualShardId(cursor.read_u64()?);
         let idempotency_key = IdempotencyKey::from(cursor.read_string()?);
         let mapping_version = cursor.read_string()?;
         let attribute_count = cursor.read_u32()? as usize;
@@ -192,6 +196,7 @@ impl IptoWritePayload {
 
         Ok(Self {
             target,
+            shard_id,
             idempotency_key,
             mapping_version,
             attributes,
@@ -711,6 +716,35 @@ pub fn replay_metadata_outbox_segment_after(
     Ok(MetadataOutboxReplay { outbox, summary })
 }
 
+/// Replay outbox segment entries whose `shard_id` falls within the given
+/// range, returning an outbox containing only the matching pending entries.
+///
+/// This enables rebalancing: when a placement map change moves a shard range
+/// to a different Ipto instance, this function extracts the relevant payloads
+/// so they can be re-delivered to the new target.
+pub fn replay_metadata_outbox_segment_for_shard_range(
+    path: impl AsRef<Path>,
+    start: DataIndividualShardId,
+    end: DataIndividualShardId,
+) -> Result<MetadataOutbox, MetadataOutboxStorageError> {
+    let mut reader = SegmentReader::open(path)?;
+    let mut outbox = MetadataOutbox::new();
+    let mut scanned = 0usize;
+    let mut matched = 0usize;
+
+    while let Some(record) = reader.read_next()? {
+        scanned += 1;
+        let payload = IptoWritePayload::decode(&record.payload)?;
+        if payload.shard_id >= start && payload.shard_id <= end {
+            let _ = outbox.enqueue_with_offset(payload, Some(record.offset));
+            matched += 1;
+        }
+    }
+
+    let _ = (scanned, matched);
+    Ok(outbox)
+}
+
 #[derive(Debug)]
 pub struct MetadataOutboxReplay {
     pub outbox: MetadataOutbox,
@@ -730,6 +764,10 @@ fn write_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 fn write_i64(out: &mut Vec<u8>, value: i64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u64(out: &mut Vec<u8>, value: u64) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
@@ -816,6 +854,14 @@ impl<'a> DecodeCursor<'a> {
             .try_into()
             .map_err(|_| IptoPayloadDecodeError::UnexpectedEof)?;
         Ok(i64::from_le_bytes(bytes))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, IptoPayloadDecodeError> {
+        let bytes: [u8; 8] = self
+            .read_exact(8)?
+            .try_into()
+            .map_err(|_| IptoPayloadDecodeError::UnexpectedEof)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 
     fn read_string(&mut self) -> Result<String, IptoPayloadDecodeError> {
@@ -1167,6 +1213,40 @@ mod tests {
         );
         assert!(writer.written.is_empty());
         assert_eq!(outbox.next_pending().unwrap().payload(), &second);
+    }
+
+    #[test]
+    fn replay_for_shard_range_filters_by_shard_id() {
+        use crate::storage::{SegmentId, SegmentWriter};
+
+        let path = temp_segment_path("shard-replay");
+        let mut writer =
+            SegmentWriter::create(&path, SegmentId::from("shard-seg"), NodeId::from("node-a"))
+                .unwrap();
+
+        let in_range = sample_payload();
+        let mut out_of_range = sample_payload();
+        out_of_range.idempotency_key = IdempotencyKey::from("other:event");
+        out_of_range.shard_id = DataIndividualShardId(999);
+
+        writer.append_record(&in_range.encode()).unwrap();
+        writer.append_record(&out_of_range.encode()).unwrap();
+        writer.seal().unwrap();
+
+        let replayed = replay_metadata_outbox_segment_for_shard_range(
+            &path,
+            DataIndividualShardId(0),
+            DataIndividualShardId(100),
+        )
+        .unwrap();
+
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(
+            replayed.next_pending().unwrap().payload().shard_id,
+            DataIndividualShardId(42)
+        );
+
+        fs::remove_file(path).unwrap();
     }
 
     #[derive(Default)]

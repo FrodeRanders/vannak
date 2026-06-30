@@ -338,6 +338,7 @@ mod tests {
 
         let payload = IptoWritePayload {
             target: crate::ipto::IptoInstanceId::from("ignored"),
+            shard_id: crate::data::DataIndividualShardId(0),
             idempotency_key: IdempotencyKey::from("test"),
             mapping_version: "v1".into(),
             attributes: {
