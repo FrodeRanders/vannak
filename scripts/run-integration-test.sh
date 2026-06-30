@@ -56,6 +56,16 @@ trap compose_down EXIT
 # ---------------------------------------------------------------------------
 echo "==> Starting PostgreSQL (port $VANNAK_PG_PORT)..."
 docker compose -f "$PG_COMPOSE" down -v 2>/dev/null || true
+
+IPTO_SQL_DIR="$PROJECT_DIR/../ipto/shared/db/postgresql"
+if [ ! -f "$IPTO_SQL_DIR/schema.sql" ]; then
+    echo "ERROR: ipto schema not found at $IPTO_SQL_DIR/schema.sql"
+    echo "  (ipto repo must be checked out at ../ipto)"
+    ls -la "$PROJECT_DIR/../ipto" 2>/dev/null || echo "  ../ipto does not exist"
+    exit 1
+fi
+export IPTO_SQL_DIR
+
 if ! docker compose -f "$PG_COMPOSE" up -d --wait postgres; then
     echo "ERROR: PostgreSQL container failed to start. Logs:"
     docker compose -f "$PG_COMPOSE" logs postgres 2>/dev/null || true

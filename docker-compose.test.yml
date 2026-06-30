@@ -20,9 +20,9 @@ services:
     ports:
       - "${VANNAK_PG_PORT:-5432}:5432"
     volumes:
-      - ../ipto/shared/db/postgresql/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
-      - ../ipto/shared/db/postgresql/procedures.sql:/docker-entrypoint-initdb.d/01_procedures.sql:ro
-      - ../ipto/shared/db/postgresql/boot.sql:/docker-entrypoint-initdb.d/02_boot.sql:ro
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/procedures.sql:/docker-entrypoint-initdb.d/01_procedures.sql:ro
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/boot.sql:/docker-entrypoint-initdb.d/02_boot.sql:ro
     restart: "no"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U repo -d repo"]
