@@ -34,7 +34,9 @@ use graft_core::membership::ClusterConfiguration;
 use graft_core::raft_node::{LogStore, PersistentStateStore, RaftNode};
 use graft_core::state_machine::StateMachine;
 use graft_core::types::Peer;
+use graft_proto::raft::ClusterSummaryResponse;
 use graft_runtime::handlers::RaftHandler;
+use prost::Message;
 use graft_runtime::runtime::RaftRuntime;
 use graft_storage::log_store::FileLogStore;
 use graft_storage::state_store::FilePersistentStateStore;
@@ -249,7 +251,19 @@ fn probe_node(host: &str, port: u16) {
             .unwrap();
         let mut buf = bytes::BytesMut::with_capacity(8192);
         if let Ok(resp) = graft_transport::codec::read_envelope(&mut stream, &mut buf).await {
-            println!("{}", String::from_utf8_lossy(&resp.payload));
+            match ClusterSummaryResponse::decode(resp.payload.as_slice()) {
+                Ok(summary) => {
+                    println!("node={} leader={} health={} status={}",
+                        summary.peer_id,
+                        summary.leader_id,
+                        summary.cluster_health,
+                        summary.status,
+                    );
+                }
+                Err(_) => {
+                    println!("(unable to decode response)");
+                }
+            }
         } else {
             eprintln!("probe: no response from {addr}");
             process::exit(1);
