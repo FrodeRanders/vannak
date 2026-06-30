@@ -87,7 +87,7 @@ echo "==> Ipto writer test complete."
 # ---------------------------------------------------------------------------
 # Load test with Ipto writer (smoke test)
 # ---------------------------------------------------------------------------
-if [ "$SKIP_LOAD" != true ]; then
+if [ "${SKIP_LOAD:-false}" != true ]; then
     if [ "$NO_BUILD" = false ]; then
         echo "==> Building vannak-load with ipto-writer feature..."
         cargo build --features ipto-writer --bin vannak-load --release 2>&1 | tail -1
