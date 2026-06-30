@@ -1814,6 +1814,7 @@ dependencies = [
  "graft-transport",
  "ipto_rust",
  "parking_lot",
+ "prost",
  "serde",
  "serde_json",
  "tokio",
