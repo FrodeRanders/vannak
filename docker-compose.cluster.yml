@@ -22,7 +22,9 @@ services:
     command: -conf /Corefile
 
   node-1:
-    build: .
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-1
     depends_on: [dns]
@@ -35,7 +37,9 @@ services:
     command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-1 /data
 
   node-2:
-    build: .
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-2
     depends_on: [node-1]
@@ -48,7 +52,9 @@ services:
     command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-2 /data
 
   node-3:
-    build: .
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-3
     depends_on: [node-1]
