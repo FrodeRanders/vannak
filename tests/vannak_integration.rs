@@ -31,22 +31,22 @@
 
 use std::sync::Arc;
 
-use ipto_rust::backends::postgres::PostgresBackend;
 use ipto_rust::backend::Backend;
+use ipto_rust::backends::postgres::PostgresBackend;
 use ipto_rust::repo::RepoService;
 
-use vannak::data::{ActiveMetadata, DataIndividualMetadataEvent, MetadataOperation, MetadataValue, PassiveMetadata};
-use vannak::ingest::{EventId, EventTimestamp, PipelineEvent, SourceId, SourceSequence};
-use vannak::index::HotIndex;
-use vannak::ipto::{
-    MetadataOutbox, IptoMapping, IptoWritePayload, IptoInstanceId,
+use vannak::data::{
+    ActiveMetadata, DataIndividualMetadataEvent, MetadataOperation, MetadataValue, PassiveMetadata,
 };
+use vannak::index::HotIndex;
+use vannak::ingest::{EventId, EventTimestamp, PipelineEvent, SourceId, SourceSequence};
+use vannak::ipto::{IptoInstanceId, IptoMapping, IptoWritePayload, MetadataOutbox};
 use vannak::ipto_adapter::IptoRepoWriter;
 use vannak::process::{
-    ActivityId, EnvironmentId, EventKind, PipelineId, ProcessDefinitionId,
-    ProcessInstanceId, ProcessStatus, TenantId,
+    ActivityId, EnvironmentId, EventKind, PipelineId, ProcessDefinitionId, ProcessInstanceId,
+    ProcessStatus, TenantId,
 };
-use vannak::query::{ProcessInstanceQuery, QueryLimit, EventQuery, QueryResult};
+use vannak::query::{EventQuery, ProcessInstanceQuery, QueryLimit, QueryResult};
 use vannak::storage::SegmentWriter;
 
 // ---------------------------------------------------------------------------
@@ -206,13 +206,21 @@ fn build_metadata_events() -> Vec<DataIndividualMetadataEvent> {
         )
         .with_passive_metadata(
             PassiveMetadata::new()
-                .insert("vannak:dataIndividualId", MetadataValue::string("customer-record-42"))
-                .insert("vannak:pipelineId", MetadataValue::string("data-pipeline-demo"))
-                .insert("vannak:processInstanceId", MetadataValue::string("customer-pipeline-run-001"))
+                .insert(
+                    "vannak:dataIndividualId",
+                    MetadataValue::string("customer-record-42"),
+                )
+                .insert(
+                    "vannak:pipelineId",
+                    MetadataValue::string("data-pipeline-demo"),
+                )
+                .insert(
+                    "vannak:processInstanceId",
+                    MetadataValue::string("customer-pipeline-run-001"),
+                )
                 .insert("vannak:tenantId", MetadataValue::string("tenant-a"))
                 .insert("vannak:environmentId", MetadataValue::string("prod")),
         ),
-
         // Transformed: name, email, data.amount extracted
         DataIndividualMetadataEvent::new(
             vannak::data::MetadataEventId::from("meta-002"),
@@ -233,7 +241,6 @@ fn build_metadata_events() -> Vec<DataIndividualMetadataEvent> {
             ActiveMetadata::new()
                 .insert("vannak:activityId", MetadataValue::string("transform_data")),
         ),
-
         // Validated: schema check passed
         DataIndividualMetadataEvent::new(
             vannak::data::MetadataEventId::from("meta-003"),
@@ -251,7 +258,6 @@ fn build_metadata_events() -> Vec<DataIndividualMetadataEvent> {
             PassiveMetadata::new()
                 .insert("vannak:activityId", MetadataValue::string("filter_fields")),
         ),
-
         // Enriched: KV lookup by email
         DataIndividualMetadataEvent::new(
             vannak::data::MetadataEventId::from("meta-004"),
@@ -268,8 +274,7 @@ fn build_metadata_events() -> Vec<DataIndividualMetadataEvent> {
         )
         .with_activity_id(ActivityId::from("enrich_data"))
         .with_active_metadata(
-            ActiveMetadata::new()
-                .insert("vannak:activityId", MetadataValue::string("enrich_data")),
+            ActiveMetadata::new().insert("vannak:activityId", MetadataValue::string("enrich_data")),
         ),
     ]
 }
@@ -299,14 +304,18 @@ fn full_ingest_index_outbox_ipto_flow() {
 
     // --- 2. Configure PROV-O SDL ---
     let mut writer = IptoRepoWriter::new(repo.clone(), 1);
-    writer.configure_sdl().expect("SDL configuration should succeed");
+    writer
+        .configure_sdl()
+        .expect("SDL configuration should succeed");
 
     // --- 3. Ingest Durga process events into HotIndex ---
     let mut hot_index = HotIndex::new();
     let pipeline_events = build_durga_pipeline_events();
 
     for event in &pipeline_events {
-        let outcome = hot_index.ingest(event.clone()).expect("ingest should succeed");
+        let outcome = hot_index
+            .ingest(event.clone())
+            .expect("ingest should succeed");
         assert!(
             matches!(outcome, vannak::index::IngestOutcome::Accepted),
             "event {} should be accepted",
@@ -323,15 +332,28 @@ fn full_ingest_index_outbox_ipto_flow() {
 
     assert_eq!(process.status, ProcessStatus::Completed);
     assert_eq!(process.pipeline_id, PipelineId::from("data-pipeline-demo"));
-    assert_eq!(process.started_at.as_ref().map(|t| t.as_str()), Some("2026-06-30T10:00:00.000Z"));
+    assert_eq!(
+        process.started_at.as_ref().map(|t| t.as_str()),
+        Some("2026-06-30T10:00:00.000Z")
+    );
 
     // Activity durations should be computed
-    let transform_dur = process.activity_durations.get(&ActivityId::from("transform_data"));
-    assert!(transform_dur.is_some(), "transform_data duration should be computed");
+    let transform_dur = process
+        .activity_durations
+        .get(&ActivityId::from("transform_data"));
+    assert!(
+        transform_dur.is_some(),
+        "transform_data duration should be computed"
+    );
     assert!(*transform_dur.unwrap() > 0);
 
-    let enrich_dur = process.activity_durations.get(&ActivityId::from("enrich_data"));
-    assert!(enrich_dur.is_some(), "enrich_data duration should be computed");
+    let enrich_dur = process
+        .activity_durations
+        .get(&ActivityId::from("enrich_data"));
+    assert!(
+        enrich_dur.is_some(),
+        "enrich_data duration should be computed"
+    );
 
     // --- 5. Verify HotIndex event query ---
     let events = hot_index.events(&EventQuery {
@@ -378,7 +400,10 @@ fn full_ingest_index_outbox_ipto_flow() {
     for _ in 0..4 {
         let result = vannak::ipto::deliver_next_pending(&mut outbox, &mut writer);
         assert!(
-            matches!(result, vannak::ipto::MetadataOutboxDeliveryResult::Acknowledged { .. }),
+            matches!(
+                result,
+                vannak::ipto::MetadataOutboxDeliveryResult::Acknowledged { .. }
+            ),
             "outbox delivery should succeed, got {result:?}"
         );
     }
@@ -393,8 +418,14 @@ fn full_ingest_index_outbox_ipto_flow() {
     let search_result = repo
         .search_units(
             serde_json::json!({"tenantid": 1, "status": 30}),
-            ipto_rust::model::SearchOrder { field: "created".to_string(), descending: true },
-            ipto_rust::model::SearchPaging { limit: 10, offset: 0 },
+            ipto_rust::model::SearchOrder {
+                field: "created".to_string(),
+                descending: true,
+            },
+            ipto_rust::model::SearchPaging {
+                limit: 10,
+                offset: 0,
+            },
         )
         .expect("search should succeed");
 
@@ -407,10 +438,13 @@ fn full_ingest_index_outbox_ipto_flow() {
     // --- 9. Verify idempotency ---
     // Re-enqueuing the same payload should be detected as duplicate.
     let dup_payload = IptoWritePayload::from_event(&metadata_events[0], &target, &mapping);
-    assert!(matches!(
-        outbox.enqueue(dup_payload),
-        vannak::ipto::OutboxEnqueueResult::Duplicate
-    ), "re-enqueuing the same payload should return Duplicate");
+    assert!(
+        matches!(
+            outbox.enqueue(dup_payload),
+            vannak::ipto::OutboxEnqueueResult::Duplicate
+        ),
+        "re-enqueuing the same payload should return Duplicate"
+    );
 
     eprintln!("SUCCESS: full ingest→index→outbox→Ipto flow verified");
 }
@@ -426,7 +460,9 @@ fn rebalancing_delivers_shard_range_to_new_target() {
     let backend: Arc<dyn Backend> = Arc::new(PostgresBackend::new());
     let repo = Arc::new(RepoService::new(backend));
     let mut writer = IptoRepoWriter::new(repo.clone(), 1);
-    writer.configure_sdl().expect("SDL configuration should succeed");
+    writer
+        .configure_sdl()
+        .expect("SDL configuration should succeed");
 
     // --- 2. Build payloads with different shard IDs ---
     let data_id_1 = vannak::data::DataIndividualId::from("rebal-customer-1");
@@ -445,10 +481,10 @@ fn rebalancing_delivers_shard_range_to_new_target() {
         EventTimestamp::from("2026-06-30T12:00:00Z"),
         MetadataOperation::Received,
     )
-    .with_passive_metadata(
-        PassiveMetadata::new()
-            .insert("vannak:dataIndividualId", MetadataValue::string("rebal-customer-1")),
-    );
+    .with_passive_metadata(PassiveMetadata::new().insert(
+        "vannak:dataIndividualId",
+        MetadataValue::string("rebal-customer-1"),
+    ));
 
     let event_2 = DataIndividualMetadataEvent::new(
         vannak::data::MetadataEventId::from("rebal-meta-2"),
@@ -461,19 +497,23 @@ fn rebalancing_delivers_shard_range_to_new_target() {
         EventTimestamp::from("2026-06-30T12:00:00Z"),
         MetadataOperation::Received,
     )
-    .with_passive_metadata(
-        PassiveMetadata::new()
-            .insert("vannak:dataIndividualId", MetadataValue::string("rebal-customer-2")),
+    .with_passive_metadata(PassiveMetadata::new().insert(
+        "vannak:dataIndividualId",
+        MetadataValue::string("rebal-customer-2"),
+    ));
+
+    let mapping =
+        IptoMapping::new("v1").map_field("vannak:dataIndividualId", "vannak:dataIndividualId");
+
+    let payload_1 =
+        IptoWritePayload::from_event(&event_1, &IptoInstanceId::from("ipto-a"), &mapping);
+    let payload_2 =
+        IptoWritePayload::from_event(&event_2, &IptoInstanceId::from("ipto-a"), &mapping);
+
+    assert_ne!(
+        payload_1.shard_id, payload_2.shard_id,
+        "different data individuals should produce different shard IDs"
     );
-
-    let mapping = IptoMapping::new("v1")
-        .map_field("vannak:dataIndividualId", "vannak:dataIndividualId");
-
-    let payload_1 = IptoWritePayload::from_event(&event_1, &IptoInstanceId::from("ipto-a"), &mapping);
-    let payload_2 = IptoWritePayload::from_event(&event_2, &IptoInstanceId::from("ipto-a"), &mapping);
-
-    assert_ne!(payload_1.shard_id, payload_2.shard_id,
-        "different data individuals should produce different shard IDs");
 
     // --- 3. Write both payloads to a segment ---
     let path = std::env::temp_dir().join(format!(
@@ -496,14 +536,8 @@ fn rebalancing_delivers_shard_range_to_new_target() {
     // --- 4. Rebalance only shard_1's range ---
     let lower = shard_1;
     let upper = shard_1; // only shard_1, not shard_2
-    let summary = vannak::ipto::rebalance_shard_range_to(
-        &path,
-        lower,
-        upper,
-        &mut writer,
-        10,
-    )
-    .unwrap();
+    let summary =
+        vannak::ipto::rebalance_shard_range_to(&path, lower, upper, &mut writer, 10).unwrap();
 
     assert_eq!(summary.entries_found, 1, "only payload_1 should match");
     assert_eq!(summary.acknowledged, 1);
@@ -511,15 +545,22 @@ fn rebalancing_delivers_shard_range_to_new_target() {
 
     // --- 5. Verify payload_1 was persisted, payload_2 was not ---
     // Look up payload_1 via search
-    let search_1 = repo.search_units(
-        serde_json::json!({"tenantid": 1, "status": 30}),
-        ipto_rust::model::SearchOrder { field: "created".to_string(), descending: true },
-        ipto_rust::model::SearchPaging { limit: 20, offset: 0 },
-    ).unwrap();
+    let search_1 = repo
+        .search_units(
+            serde_json::json!({"tenantid": 1, "status": 30}),
+            ipto_rust::model::SearchOrder {
+                field: "created".to_string(),
+                descending: true,
+            },
+            ipto_rust::model::SearchPaging {
+                limit: 20,
+                offset: 0,
+            },
+        )
+        .unwrap();
     assert!(search_1.total_hits >= 1, "payload_1 should be persisted");
 
     // Clean up
     std::fs::remove_file(path).unwrap();
     eprintln!("SUCCESS: rebalancing delivers shard range to new target");
 }
-

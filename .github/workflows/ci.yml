@@ -1,0 +1,129 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_TIMEOUT: "300"
+  CARGO_NET_RETRY: "3"
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Unit tests + clippy (all feature combinations)
+  # -----------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout sibling repos
+        run: |
+          git clone --depth 1 https://github.com/anomalyco/ipto.git ../ipto
+          git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ../ipto/implementations/rust -> ../ipto/implementations/rust/target
+            ../raft/graft-rust -> ../raft/graft-rust/target
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: clippy (no features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: test (no features)
+        run: cargo test
+
+      - name: clippy (ipto-writer)
+        run: cargo clippy --features ipto-writer --all-targets -- -D warnings
+
+      - name: clippy (raft)
+        run: cargo clippy --features raft --all-targets -- -D warnings
+
+      - name: test (raft)
+        run: cargo test --features raft
+
+      - name: clippy (node)
+        run: cargo clippy --features node --all-targets -- -D warnings
+
+      - name: build (node)
+        run: cargo build --features node
+
+  # -----------------------------------------------------------------------
+  # Ipto writer integration test (PostgreSQL)
+  # -----------------------------------------------------------------------
+  integration-pg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout sibling repos
+        run: |
+          git clone --depth 1 https://github.com/anomalyco/ipto.git ../ipto
+          git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ../ipto/implementations/rust -> ../ipto/implementations/rust/target
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run integration test
+        run: VANNAK_PG_PORT=5432 ./scripts/run-integration-test.sh --no-build
+
+  # -----------------------------------------------------------------------
+  # Raft cluster integration test (DNS auto-discovery)
+  # -----------------------------------------------------------------------
+  integration-cluster:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout sibling repos
+        run: |
+          git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            ../raft/graft-rust -> ../raft/graft-rust/target
+
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Run cluster test
+        run: ./scripts/run-integration-test.sh --cluster --no-build
+
+  # -----------------------------------------------------------------------
+  # Format check
+  # -----------------------------------------------------------------------
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check

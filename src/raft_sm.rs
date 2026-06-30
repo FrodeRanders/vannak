@@ -25,7 +25,7 @@
 
 use crate::cluster::{
     CheckpointEpoch, CheckpointManifest, ClusterControlCommand, ClusterControlError,
-    ClusterControlState, IptoPlacementMap, IptoPlacementSlot, IptoPlacementRange, LeaseEpoch,
+    ClusterControlState, IptoPlacementMap, IptoPlacementRange, IptoPlacementSlot, LeaseEpoch,
     MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
 };
 use crate::data::DataIndividualShardId;
@@ -179,13 +179,9 @@ fn to_ser_slots(slots: &[IptoPlacementSlot]) -> Vec<SerPlacementSlot> {
         .collect()
 }
 
-fn from_ser_slots(
-    ser: &[SerPlacementSlot],
-) -> Result<Vec<IptoPlacementSlot>, ClusterControlError> {
+fn from_ser_slots(ser: &[SerPlacementSlot]) -> Result<Vec<IptoPlacementSlot>, ClusterControlError> {
     ser.iter()
-        .map(|s| {
-            IptoPlacementSlot::new(IptoInstanceId::from(s.instance.as_str()), s.vnodes)
-        })
+        .map(|s| IptoPlacementSlot::new(IptoInstanceId::from(s.instance.as_str()), s.vnodes))
         .collect::<Result<Vec<_>, _>>()
 }
 
@@ -283,14 +279,15 @@ pub(crate) fn encode_command(cmd: &ClusterControlCommand) -> Result<Vec<u8>, ser
 }
 
 pub(crate) fn decode_command(data: &[u8]) -> Result<ClusterControlCommand, String> {
-    let ser_cmd: SerClusterControlCommand = serde_json::from_slice(data).map_err(|e| e.to_string())?;
+    let ser_cmd: SerClusterControlCommand =
+        serde_json::from_slice(data).map_err(|e| e.to_string())?;
     match ser_cmd.variant {
-        SerCommandVariant::AddNode { node_id } => {
-            Ok(ClusterControlCommand::AddNode(NodeId::from(node_id.as_str())))
-        }
-        SerCommandVariant::RemoveNode { node_id } => {
-            Ok(ClusterControlCommand::RemoveNode(NodeId::from(node_id.as_str())))
-        }
+        SerCommandVariant::AddNode { node_id } => Ok(ClusterControlCommand::AddNode(NodeId::from(
+            node_id.as_str(),
+        ))),
+        SerCommandVariant::RemoveNode { node_id } => Ok(ClusterControlCommand::RemoveNode(
+            NodeId::from(node_id.as_str()),
+        )),
         SerCommandVariant::SetIptoPlacementMap {
             epoch,
             slots,
@@ -335,14 +332,16 @@ pub(crate) fn decode_command(data: &[u8]) -> Result<ClusterControlCommand, Strin
             record_count,
             byte_len,
             checksum,
-        } => Ok(ClusterControlCommand::RecordSealedSegment(SegmentManifest {
-            segment_id: SegmentId::from(segment_id.as_str()),
-            node_id: NodeId::from(node_id.as_str()),
-            path: PathBuf::from(path),
-            record_count,
-            byte_len,
-            checksum,
-        })),
+        } => Ok(ClusterControlCommand::RecordSealedSegment(
+            SegmentManifest {
+                segment_id: SegmentId::from(segment_id.as_str()),
+                node_id: NodeId::from(node_id.as_str()),
+                path: PathBuf::from(path),
+                record_count,
+                byte_len,
+                checksum,
+            },
+        )),
         SerCommandVariant::RecordCheckpoint {
             checkpoint_id,
             node_id,
@@ -370,7 +369,7 @@ pub(crate) fn decode_command(data: &[u8]) -> Result<ClusterControlCommand, Strin
                     checksum,
                 },
             ))
-        },
+        }
     }
 }
 
@@ -453,18 +452,15 @@ fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
 
     for node in &snapshot.nodes {
         state
-            .apply(ClusterControlCommand::AddNode(NodeId::from(
-                node.as_str(),
-            )))
+            .apply(ClusterControlCommand::AddNode(NodeId::from(node.as_str())))
             .map_err(|e| e.to_string())?;
     }
 
     for map_data in &snapshot.placement_maps {
         let slots = from_ser_slots(&map_data.slots).map_err(|e| e.to_string())?;
         let overrides = from_ser_overrides(&map_data.overrides).map_err(|e| e.to_string())?;
-        let map =
-            IptoPlacementMap::new(PlacementEpoch(map_data.epoch), slots, overrides)
-                .map_err(|e| e.to_string())?;
+        let map = IptoPlacementMap::new(PlacementEpoch(map_data.epoch), slots, overrides)
+            .map_err(|e| e.to_string())?;
         state
             .apply(ClusterControlCommand::SetIptoPlacementMap(map))
             .map_err(|e| e.to_string())?;
@@ -499,14 +495,16 @@ fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
 
     for seg_data in &snapshot.sealed_segments {
         state
-            .apply(ClusterControlCommand::RecordSealedSegment(SegmentManifest {
-                segment_id: SegmentId::from(seg_data.segment_id.as_str()),
-                node_id: NodeId::from(seg_data.node_id.as_str()),
-                path: PathBuf::from(seg_data.path.as_str()),
-                record_count: seg_data.record_count,
-                byte_len: seg_data.byte_len,
-                checksum: seg_data.checksum,
-            }))
+            .apply(ClusterControlCommand::RecordSealedSegment(
+                SegmentManifest {
+                    segment_id: SegmentId::from(seg_data.segment_id.as_str()),
+                    node_id: NodeId::from(seg_data.node_id.as_str()),
+                    path: PathBuf::from(seg_data.path.as_str()),
+                    record_count: seg_data.record_count,
+                    byte_len: seg_data.byte_len,
+                    checksum: seg_data.checksum,
+                },
+            ))
             .map_err(|e| e.to_string())?;
     }
 
@@ -754,12 +752,14 @@ mod tests {
         let map = IptoPlacementMap::new(
             PlacementEpoch(2),
             vec![slot("ipto-x", 128)],
-            vec![IptoPlacementRange::new(
-                DataIndividualShardId(10),
-                DataIndividualShardId(20),
-                IptoInstanceId::from("ipto-override"),
-            )
-            .unwrap()],
+            vec![
+                IptoPlacementRange::new(
+                    DataIndividualShardId(10),
+                    DataIndividualShardId(20),
+                    IptoInstanceId::from("ipto-override"),
+                )
+                .unwrap(),
+            ],
         )
         .unwrap();
         let cmd = ClusterControlCommand::SetIptoPlacementMap(map);
@@ -790,7 +790,11 @@ mod tests {
             state.placement_map_history().count(),
             decoded.placement_map_history().count()
         );
-        assert!(decoded.resolve_ipto_target(DataIndividualShardId(42)).is_some());
+        assert!(
+            decoded
+                .resolve_ipto_target(DataIndividualShardId(42))
+                .is_some()
+        );
     }
 
     #[test]
@@ -814,7 +818,8 @@ mod tests {
         let state = build_test_state();
         *sm.state.write().unwrap() = state;
 
-        let query = serde_json::to_vec(&ClusterQuery::ResolveWithFallback { shard_id: 42 }).unwrap();
+        let query =
+            serde_json::to_vec(&ClusterQuery::ResolveWithFallback { shard_id: 42 }).unwrap();
         let result: Vec<String> = serde_json::from_slice(&sm.query(&query)).unwrap();
         assert!(!result.is_empty());
     }

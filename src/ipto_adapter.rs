@@ -218,10 +218,7 @@ impl IptoRepoWriter {
         }
     }
 
-    fn build_unit_payload(
-        &self,
-        payload: &IptoWritePayload,
-    ) -> Result<Value, IptoWriteError> {
+    fn build_unit_payload(&self, payload: &IptoWritePayload) -> Result<Value, IptoWriteError> {
         let corrid = self.corrid_for_key(&payload.idempotency_key);
 
         let mut attributes: Vec<Value> = Vec::new();
@@ -271,9 +268,7 @@ impl IptoWriter for IptoRepoWriter {
             .get_unit_by_corrid_json(&corrid)
             .map_err(|e| IptoWriteError::retryable(format!("corrid lookup failed: {e}")))?
         {
-            Some(_existing) => {
-                Ok(())
-            }
+            Some(_existing) => Ok(()),
             None => {
                 let unit = self.build_unit_payload(payload)?;
                 self.repo
@@ -300,10 +295,7 @@ mod tests {
     #[test]
     fn corrid_is_deterministic() {
         let backend = Arc::new(ipto_rust::backends::postgres::PostgresBackend::new());
-        let writer = IptoRepoWriter::new(
-            Arc::new(RepoService::new(backend)),
-            1,
-        );
+        let writer = IptoRepoWriter::new(Arc::new(RepoService::new(backend)), 1);
         let key = IdempotencyKey::from("data-1:metadata-event-1");
 
         let a = writer.corrid_for_key(&key);
@@ -316,10 +308,7 @@ mod tests {
     #[test]
     fn corrid_differs_for_different_keys() {
         let backend = Arc::new(ipto_rust::backends::postgres::PostgresBackend::new());
-        let writer = IptoRepoWriter::new(
-            Arc::new(RepoService::new(backend)),
-            1,
-        );
+        let writer = IptoRepoWriter::new(Arc::new(RepoService::new(backend)), 1);
         let a = writer.corrid_for_key(&IdempotencyKey::from("data-1:event-1"));
         let b = writer.corrid_for_key(&IdempotencyKey::from("data-1:event-2"));
         assert_ne!(a, b);

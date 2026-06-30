@@ -26,9 +26,9 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::process;
 
 use graft_core::membership::ClusterConfiguration;
 use graft_core::raft_node::{LogStore, PersistentStateStore, RaftNode};
@@ -167,20 +167,18 @@ fn run_server(
             tokio::spawn(async move {
                 let mut buf = bytes::BytesMut::with_capacity(8192);
                 loop {
-                    let envelope = match graft_transport::codec::read_envelope(&mut stream, &mut buf)
-                        .await
-                    {
-                        Ok(e) => e,
-                        Err(_) => return,
-                    };
+                    let envelope =
+                        match graft_transport::codec::read_envelope(&mut stream, &mut buf).await {
+                            Ok(e) => e,
+                            Err(_) => return,
+                        };
                     let resp_payload = h.dispatch(&envelope.r#type, &envelope.payload).await;
                     let resp = graft_proto::Envelope {
                         correlation_id: envelope.correlation_id,
                         r#type: response_type_for(&envelope.r#type),
                         payload: resp_payload,
                     };
-                    if let Err(_) =
-                        graft_transport::codec::write_envelope(&mut stream, &resp).await
+                    if let Err(_) = graft_transport::codec::write_envelope(&mut stream, &resp).await
                     {
                         return;
                     }
@@ -227,7 +225,9 @@ fn main() {
         let peers: Vec<String> = args[5..].to_vec();
         (host.clone(), port, peer_id.clone(), data_dir.clone(), peers)
     } else {
-        eprintln!("Usage: vannak-node [--srv <service>] <host> <port> <peer-id> <data-dir> [peers...]");
+        eprintln!(
+            "Usage: vannak-node [--srv <service>] <host> <port> <peer-id> <data-dir> [peers...]"
+        );
         process::exit(1);
     };
 

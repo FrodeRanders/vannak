@@ -451,10 +451,7 @@ impl ClusterControlState {
         Ok(())
     }
 
-    fn insert_placement_map(
-        &mut self,
-        map: IptoPlacementMap,
-    ) -> Result<(), ClusterControlError> {
+    fn insert_placement_map(&mut self, map: IptoPlacementMap) -> Result<(), ClusterControlError> {
         if let Some((_, current)) = self.placement_maps.last_key_value()
             && map.epoch <= current.epoch
         {
@@ -495,10 +492,7 @@ impl ClusterControlState {
     /// Returns candidate Ipto instances in priority order: current epoch first,
     /// then previous epochs (newest first), deduplicated. If the shard ID is
     /// not covered by any known map, returns an empty vector.
-    pub fn resolve_with_fallback(
-        &self,
-        shard_id: DataIndividualShardId,
-    ) -> Vec<IptoInstanceId> {
+    pub fn resolve_with_fallback(&self, shard_id: DataIndividualShardId) -> Vec<IptoInstanceId> {
         let mut candidates = Vec::new();
 
         for map in self.placement_maps.values().rev() {
@@ -631,9 +625,7 @@ pub enum ClusterControlError {
 impl fmt::Display for ClusterControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoPlacementSlots => {
-                f.write_str("Ipto placement map requires at least one slot")
-            }
+            Self::NoPlacementSlots => f.write_str("Ipto placement map requires at least one slot"),
             Self::ZeroVnodes { instance } => write!(
                 f,
                 "Ipto placement slot for '{}' must have at least one virtual node",
@@ -731,10 +723,8 @@ mod tests {
 
     #[test]
     fn ring_assigns_every_shard_to_an_instance() {
-        let ring = IptoPlacementRing::new(
-            PlacementEpoch(1),
-            &[slot("ipto-a", 64), slot("ipto-b", 64)],
-        );
+        let ring =
+            IptoPlacementRing::new(PlacementEpoch(1), &[slot("ipto-a", 64), slot("ipto-b", 64)]);
         assert!(!ring.is_empty());
 
         let mut hits: BTreeMap<String, u64> = BTreeMap::new();
@@ -752,14 +742,8 @@ mod tests {
 
     #[test]
     fn ring_is_deterministic() {
-        let a = IptoPlacementRing::new(
-            PlacementEpoch(1),
-            &[slot("ipto-a", 32)],
-        );
-        let b = IptoPlacementRing::new(
-            PlacementEpoch(1),
-            &[slot("ipto-a", 32)],
-        );
+        let a = IptoPlacementRing::new(PlacementEpoch(1), &[slot("ipto-a", 32)]);
+        let b = IptoPlacementRing::new(PlacementEpoch(1), &[slot("ipto-a", 32)]);
 
         for i in 0..1000u64 {
             let shard = test_shard(i);
@@ -818,10 +802,7 @@ mod tests {
         let ring = IptoPlacementRing::new(PlacementEpoch(1), &[slot("ipto-a", 1)]);
         for i in 0..1000u64 {
             let shard = test_shard(i);
-            assert_eq!(
-                ring.resolve(shard),
-                Some(&IptoInstanceId::from("ipto-a"))
-            );
+            assert_eq!(ring.resolve(shard), Some(&IptoInstanceId::from("ipto-a")));
         }
     }
 
@@ -925,9 +906,11 @@ mod tests {
             .apply(ClusterControlCommand::SetIptoPlacementMap(map))
             .unwrap();
 
-        assert!(state
-            .resolve_ipto_target(DataIndividualShardId(42))
-            .is_some());
+        assert!(
+            state
+                .resolve_ipto_target(DataIndividualShardId(42))
+                .is_some()
+        );
 
         state
             .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
@@ -1016,12 +999,8 @@ mod tests {
             .unwrap();
 
         for epoch in 1..=7u64 {
-            let map = IptoPlacementMap::new(
-                PlacementEpoch(epoch),
-                vec![slot("ipto-a", 1)],
-                vec![],
-            )
-            .unwrap();
+            let map = IptoPlacementMap::new(PlacementEpoch(epoch), vec![slot("ipto-a", 1)], vec![])
+                .unwrap();
             state
                 .apply(ClusterControlCommand::SetIptoPlacementMap(map))
                 .unwrap();
@@ -1038,18 +1017,10 @@ mod tests {
     fn resolve_with_fallback_returns_candidates_in_epoch_order() {
         let mut state = ClusterControlState::new();
 
-        let map1 = IptoPlacementMap::new(
-            PlacementEpoch(1),
-            vec![slot("ipto-a", 1)],
-            vec![],
-        )
-        .unwrap();
-        let map2 = IptoPlacementMap::new(
-            PlacementEpoch(2),
-            vec![slot("ipto-b", 1)],
-            vec![],
-        )
-        .unwrap();
+        let map1 =
+            IptoPlacementMap::new(PlacementEpoch(1), vec![slot("ipto-a", 1)], vec![]).unwrap();
+        let map2 =
+            IptoPlacementMap::new(PlacementEpoch(2), vec![slot("ipto-b", 1)], vec![]).unwrap();
 
         state
             .apply(ClusterControlCommand::SetIptoPlacementMap(map1))
