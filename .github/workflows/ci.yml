@@ -11,6 +11,9 @@ env:
   CARGO_HTTP_TIMEOUT: "300"
   CARGO_NET_RETRY: "3"
 
+permissions:
+  contents: read
+
 jobs:
   # -----------------------------------------------------------------------
   # Unit tests + clippy (all feature combinations)
@@ -18,7 +21,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout sibling repos
         run: |
@@ -28,10 +31,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
+          cache-workspaces: |
             . -> target
             ../ipto/implementations/rust -> ../ipto/implementations/rust/target
             ../raft/graft-rust -> ../raft/graft-rust/target
@@ -66,7 +66,7 @@ jobs:
   integration-pg:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout sibling repos
         run: |
@@ -74,10 +74,8 @@ jobs:
           git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
+          cache-workspaces: |
             . -> target
             ../ipto/implementations/rust -> ../ipto/implementations/rust/target
 
@@ -93,17 +91,14 @@ jobs:
   integration-cluster:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Checkout sibling repos
-        run: |
-          git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
+        run: git clone --depth 1 https://github.com/anomalyco/raft.git ../raft
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-
-      - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
+          cache-workspaces: |
             . -> target
             ../raft/graft-rust -> ../raft/graft-rust/target
 
@@ -119,7 +114,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
