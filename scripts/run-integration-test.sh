@@ -85,6 +85,21 @@ echo ""
 echo "==> Ipto writer test complete."
 
 # ---------------------------------------------------------------------------
+# Load test with Ipto writer (smoke test)
+# ---------------------------------------------------------------------------
+if [ "$SKIP_LOAD" != true ]; then
+    if [ "$NO_BUILD" = false ]; then
+        echo "==> Building vannak-load with ipto-writer feature..."
+        cargo build --features ipto-writer --bin vannak-load --release 2>&1 | tail -1
+    fi
+    echo "==> Running load test (100 pipelines, with Ipto)..."
+    cargo run --features ipto-writer --bin vannak-load --release -- \
+        --pipelines 100 --report-interval 50 --with-ipto 2>&1
+    echo ""
+    echo "==> Load test complete."
+fi
+
+# ---------------------------------------------------------------------------
 # Raft cluster integration test
 # ---------------------------------------------------------------------------
 if [ "$RUN_CLUSTER" = true ]; then
