@@ -25,7 +25,7 @@
 //!   vannak-node serve --srv _raft._tcp.vannak.local <host> <port> <peer-id> <data-dir>
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::process;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -45,30 +45,47 @@ use tokio::runtime::Runtime;
 
 use vannak::raft_sm::ClusterStateMachine;
 
-fn resolve_dns_srv(service: &str) -> Vec<String> {
-    let output = process::Command::new("dig")
-        .args(["+short", "SRV", service])
-        .output();
-
-    if let Ok(out) = output
-        && out.status.success()
-    {
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let mut peers = Vec::new();
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let port = parts[2];
-                let hostname = parts[3].trim_end_matches('.');
-                let peer_id = hostname.split('.').next().unwrap_or(hostname);
-                peers.push(format!("{}@{}:{}", peer_id, hostname, port));
-            }
+fn resolve_dns_srv(service: &str, my_peer_id: &str) -> Vec<String> {
+    for attempt in 0..30 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
-        if !peers.is_empty() {
-            return peers;
+        let output = process::Command::new("dig")
+            .args(["+short", "SRV", service])
+            .output();
+
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.trim().is_empty() {
+                let mut peers = Vec::new();
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let port = parts[2];
+                        let hostname = parts[3].trim_end_matches('.');
+                        let peer_id = hostname.split('.').next().unwrap_or(hostname);
+                        if peer_id == my_peer_id {
+                            continue;
+                        }
+                        let addr_str = format!("{hostname}:{port}");
+                        if let Ok(mut addrs) = addr_str.to_socket_addrs() {
+                            if let Some(addr) = addrs.next() {
+                                peers.push(format!("{peer_id}@{addr}"));
+                            }
+                        }
+                    }
+                }
+                if !peers.is_empty() {
+                    eprintln!("Resolved {} peers via DNS SRV", peers.len());
+                    return peers;
+                }
+            }
         }
     }
 
+    eprintln!("Warning: DNS SRV resolution failed for {service}, starting without peers");
     Vec::new()
 }
 
@@ -207,7 +224,7 @@ fn main() {
         let port: u16 = args[4].parse().unwrap_or(10081);
         let peer_id = &args[5];
         let data_dir = &args[6];
-        let peers = resolve_dns_srv(service);
+        let peers = resolve_dns_srv(service, peer_id);
         if peers.is_empty() {
             eprintln!("Warning: no peers resolved from DNS SRV {service}, starting as single node");
         }
