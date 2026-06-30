@@ -30,12 +30,24 @@ serde_json = { version = "1", optional = true }
 uuid = { version = "1", features = ["v7"], optional = true }
 graft-core = { path = "../raft/graft-rust/graft-core", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+graft-runtime = { path = "../raft/graft-rust/graft-runtime", optional = true }
+graft-storage = { path = "../raft/graft-rust/graft-storage", optional = true }
+graft-transport = { path = "../raft/graft-rust/graft-transport", optional = true }
+tokio = { version = "1", features = ["full"], optional = true }
+parking_lot = { version = "0.12", optional = true }
+graft-proto = { path = "../raft/graft-rust/graft-proto", optional = true }
+bytes = { version = "1", optional = true }
 
 [features]
 default = []
 ipto-writer = ["dep:ipto_rust", "dep:serde_json", "dep:uuid"]
 raft = ["dep:graft-core", "dep:serde", "dep:serde_json"]
+node = ["raft", "dep:graft-runtime", "dep:graft-storage", "dep:graft-transport", "dep:tokio", "dep:parking_lot", "dep:graft-proto", "dep:bytes"]
 
 [[test]]
 name = "vannak_integration"
 required-features = ["ipto-writer"]
+
+[[bin]]
+name = "vannak-node"
+required-features = ["node"]

@@ -1,0 +1,73 @@
+# Docker Compose for a 3-node Vannak Raft cluster with DNS-based auto-discovery.
+#
+# Mirrors the Raft project's compose-srv-rust.yml pattern. CoreDNS serves
+# static SRV records so nodes discover each other via DNS at startup.
+#
+# Usage:
+#   docker compose -f docker-compose.cluster.yml build
+#   docker compose -f docker-compose.cluster.yml up -d
+#   # Wait for leader election, then verify cluster state
+#   docker compose -f docker-compose.cluster.yml down -v
+
+services:
+  dns:
+    image: coredns/coredns:latest
+    container_name: vannak-dns
+    networks:
+      raft-net:
+        ipv4_address: 10.77.0.10
+    volumes:
+      - ./dns/Corefile:/Corefile:ro
+      - ./dns/vannak.local.db:/vannak.local.db:ro
+    command: -conf /Corefile
+
+  node-1:
+    build: .
+    image: vannak-node:local
+    container_name: vannak-1
+    depends_on: [dns]
+    networks:
+      raft-net:
+        ipv4_address: 10.77.0.11
+    dns: [10.77.0.10]
+    volumes:
+      - node-1-data:/data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-1 /data
+
+  node-2:
+    build: .
+    image: vannak-node:local
+    container_name: vannak-2
+    depends_on: [node-1]
+    networks:
+      raft-net:
+        ipv4_address: 10.77.0.12
+    dns: [10.77.0.10]
+    volumes:
+      - node-2-data:/data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-2 /data
+
+  node-3:
+    build: .
+    image: vannak-node:local
+    container_name: vannak-3
+    depends_on: [node-1]
+    networks:
+      raft-net:
+        ipv4_address: 10.77.0.13
+    dns: [10.77.0.10]
+    volumes:
+      - node-3-data:/data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-3 /data
+
+networks:
+  raft-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+
+volumes:
+  node-1-data:
+  node-2-data:
+  node-3-data:

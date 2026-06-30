@@ -1,0 +1,11 @@
+vannak.local:53 {
+    file /vannak.local.db
+    log
+    errors
+}
+
+.:53 {
+    forward . 1.1.1.1 8.8.8.8
+    log
+    errors
+}

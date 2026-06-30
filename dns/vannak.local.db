@@ -1,0 +1,14 @@
+$ORIGIN vannak.local.
+$TTL 5
+@       IN SOA  ns.vannak.local. hostmaster.vannak.local. (2026060601 5 5 60 5)
+        IN NS   ns.vannak.local.
+
+ns      IN A    10.77.0.10
+
+vannak-1 IN A    10.77.0.11
+vannak-2 IN A    10.77.0.12
+vannak-3 IN A    10.77.0.13
+
+_vannak._tcp IN SRV 10 10 7000 vannak-1.vannak.local.
+_vannak._tcp IN SRV 10 10 7000 vannak-2.vannak.local.
+_vannak._tcp IN SRV 10 10 7000 vannak-3.vannak.local.
