@@ -94,7 +94,11 @@ fn parse_peer_spec(spec: &str) -> Option<(String, SocketAddr)> {
     if let Ok(addr) = SocketAddr::from_str(addr_part) {
         return Some((id_part.to_string(), addr));
     }
-    addr_part.to_socket_addrs().ok()?.next().map(|addr| (id_part.to_string(), addr))
+    addr_part
+        .to_socket_addrs()
+        .ok()?
+        .next()
+        .map(|addr| (id_part.to_string(), addr))
 }
 
 fn listen_addr(host: &str, port: u16) -> SocketAddr {
