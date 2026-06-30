@@ -25,7 +25,7 @@ metadata systems.
 The project combines four existing lines of work:
 
 - Sitas: a Rust-native shard-per-core runtime and service model;
-- Durga: data-pipeline/process management with BPMN-like process state and
+- Durga: data-pipeline/process management with BPMN process state and
   monitoring;
 - Ipto: metadata management and semantic object modeling;
 - a Rust Raft implementation: replicated agreement for cluster control state.

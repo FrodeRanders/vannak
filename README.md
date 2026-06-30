@@ -61,8 +61,13 @@ Implemented so far:
 - single-node hot index for process events and metadata-impact lookup;
 - data-individual metadata/provenance event model;
 - passive and active metadata maps;
-- domain-level `DataIndividualShardId` for Ipto placement;
-- Ipto placement resolver;
+- domain-level `DataIndividualShardId` for Ipto placement, with a deterministic
+  hash-derivation helper (`from_data_individual`);
+- consistent-hash ring placement (`IptoPlacementRing`) with configurable virtual
+  nodes per Ipto instance, plus optional range overrides for explicit placement;
+- Raft-replicable `IptoPlacementMap` combining the ring with optional operator
+  overrides;
+- placement map history with epoch-based query fallback in `ClusterControlState`;
 - field-to-Ipto-attribute mapping;
 - idempotent Ipto write payload construction;
 - in-memory metadata outbox state for pending, acknowledged, failed, and retry
@@ -180,7 +185,8 @@ writer tasks are still future work.
 
 ```text
 src/
-  cluster.rs        Raft/control-plane boundary placeholders
+  cluster.rs        Raft/control-plane boundary: consistent-hash ring placement,
+                    writer leases, checkpoints, placement history with fallback
   data.rs           data-individual metadata and provenance types
   durga.rs          Durga monitor compatibility types
   index.rs          dependency-free hot index

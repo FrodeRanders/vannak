@@ -366,7 +366,45 @@ The exact metadata vocabulary can remain dynamic and Ipto-backed. Vannak should
 still keep the envelope typed so routing, durability, idempotency, and
 correlation are not inferred from arbitrary payload strings.
 
-## 5. Sharding Model
+## 5. Sharding and Placement Model
+
+### Data-individual metadata placement
+
+Metadata placement maps `DataIndividualShardId` to `IptoInstanceId` using a
+**consistent-hash ring**. Each Ipto instance contributes a configurable number
+of virtual nodes placed on the u64 ring via a deterministic FNV-1a-based hash
+of `(instance_id, vnode_index)`. The ring is built locally from Raft-replicated
+slot configuration — the ring points themselves are never stored or
+replicated.
+
+```
+DataIndividualShardId(0x7a3f...)
+    │
+    ▼
+ring positions (sorted u64):
+  [hash("ipto-a", 0)=0x0a1f..., hash("ipto-b", 0)=0x3c2e..., hash("ipto-a", 1)=0x8f4a..., ...]
+    │
+    ▼
+IptoInstanceId("ipto-b")
+```
+
+Adding or removing an Ipto instance affects only ~1/N of the shard space. The
+ring is epoch-versioned; Raft replicates the compact slot configuration
+(`Vec<IptoPlacementSlot>`), not the ring points.
+
+**Range overrides** let operators pin shard ranges to specific Ipto instances
+when business requirements demand it (e.g., a dedicated compliance instance).
+Overrides take priority over the ring.
+
+**Placement history and query fallback.** When the placement map changes
+(reconfiguration), data written under the old epoch may still reside on a
+previous instance. `ClusterControlState` keeps a bounded history of placement
+maps (last 5 epochs by default). Queries try the current epoch's target first,
+then fall back through previous epochs, and finally broadcast to all known
+Ipto instances if needed. No data movement is required — the query layer
+absorbs the placement change.
+
+### Sitas runtime sharding
 
 The first routing strategy should be simple and explicit.
 
@@ -549,8 +587,8 @@ Raft should own compact cluster state:
 - logical partition ownership;
 - leadership or lease records;
 - active metadata version;
-- Ipto placement map from `DataIndividualShardId` ranges or buckets to
-  `IptoInstanceId`;
+- Ipto placement maps (slot configuration for the consistent-hash ring, plus
+  optional range overrides);
 - sealed segment manifests;
 - metadata outbox checkpoint manifests;
 - checkpoint manifests;
@@ -577,7 +615,8 @@ the same way.
 
 Good Raft payloads:
 
-- `DataIndividualShardId` to `IptoInstanceId` placement maps;
+- `IptoPlacementSlot` configuration for the consistent-hash ring;
+- operator-defined `IptoPlacementRange` overrides;
 - writer leases for an Ipto target or data-individual shard range;
 - ownership epochs for process, metadata, or writer partitions;
 - active metadata mapping versions;
@@ -604,7 +643,7 @@ metadata that makes those paths recoverable and unambiguous.
 The first useful Raft-backed feature should be:
 
 ```text
-Ipto placement map
+Ipto placement map (consistent-hash ring + overrides)
     +
 writer lease
     +
@@ -613,9 +652,12 @@ metadata outbox checkpoint
 
 That gives the cluster three concrete guarantees:
 
-1. all nodes agree where durable metadata for a data individual belongs;
+1. all nodes agree where durable metadata for a data individual belongs
+   (deterministic ring from agreed slot configuration);
 2. only the lease holder actively writes a given Ipto target or placement range;
-3. failover can resume replay from an agreed checkpoint instead of guessing.
+3. failover can resume replay from an agreed checkpoint, and queries can fall
+   back through placement history epochs instead of requiring immediate
+   rebalancing.
 
 ## 10. Checkpoints and Recovery
 
@@ -911,6 +953,8 @@ metadata.
 - What is the canonical identity scheme for data individuals?
 - How is `DataIndividualShardId` assigned and kept stable?
 - What is the first Ipto placement-map format?
+  _Resolved: consistent-hash ring from `IptoPlacementSlot` configuration, with
+  optional range overrides. See `cluster.rs`._
 - Which passive metadata fields should be part of the core envelope?
 - Which active metadata operations should be standardized first?
 - How are flowing-data names mapped to Ipto attributes and records?

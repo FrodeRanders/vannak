@@ -22,7 +22,9 @@
 //! PostgreSQL-backed repositories.
 
 use crate::NodeId;
-use crate::cluster::{CheckpointEpoch, MetadataOutboxCheckpoint};
+use crate::cluster::{
+    CheckpointEpoch, ClusterControlError, IptoPlacementMap, MetadataOutboxCheckpoint,
+};
 use crate::data::{
     DataIndividualMetadataEvent, DataIndividualShardId, IdempotencyKey, MetadataFieldName,
     MetadataValue,
@@ -65,50 +67,6 @@ impl fmt::Display for IptoInstanceId {
         f.write_str(&self.0)
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IptoPlacement {
-    buckets: Vec<IptoInstanceId>,
-}
-
-impl IptoPlacement {
-    pub fn new(buckets: Vec<IptoInstanceId>) -> Result<Self, IptoPlacementError> {
-        if buckets.is_empty() {
-            return Err(IptoPlacementError::NoInstances);
-        }
-        Ok(Self { buckets })
-    }
-
-    pub fn resolve(
-        &self,
-        shard_id: DataIndividualShardId,
-    ) -> Result<IptoInstanceId, IptoPlacementError> {
-        let idx = shard_id.0 as usize % self.buckets.len();
-        self.buckets
-            .get(idx)
-            .cloned()
-            .ok_or(IptoPlacementError::NoInstances)
-    }
-
-    pub fn instances(&self) -> &[IptoInstanceId] {
-        &self.buckets
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IptoPlacementError {
-    NoInstances,
-}
-
-impl fmt::Display for IptoPlacementError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoInstances => f.write_str("Ipto placement requires at least one instance"),
-        }
-    }
-}
-
-impl std::error::Error for IptoPlacementError {}
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IptoAttributeName(String);
@@ -179,9 +137,9 @@ pub struct IptoWritePayload {
 impl IptoWritePayload {
     pub fn from_event(
         event: &DataIndividualMetadataEvent,
-        placement: &IptoPlacement,
+        placement: &IptoPlacementMap,
         mapping: &IptoMapping,
-    ) -> Result<Self, IptoPlacementError> {
+    ) -> Result<Self, ClusterControlError> {
         let mut attributes = BTreeMap::new();
         for (field, value) in event.passive_metadata().fields() {
             if let Some(attribute) = mapping.attribute_for(field) {
@@ -194,8 +152,15 @@ impl IptoWritePayload {
             }
         }
 
+        let target = placement
+            .resolve(event.data_individual_shard_id())
+            .cloned()
+            .ok_or(ClusterControlError::NoShardTarget {
+                shard_id: event.data_individual_shard_id(),
+            })?;
+
         Ok(Self {
-            target: placement.resolve(event.data_individual_shard_id())?,
+            target,
             idempotency_key: event.idempotency_key().clone(),
             mapping_version: mapping.version().to_string(),
             attributes,
@@ -894,6 +859,7 @@ impl<'a> DecodeCursor<'a> {
 mod tests {
     use super::*;
     use crate::NodeId;
+    use crate::cluster::{IptoPlacementSlot, PlacementEpoch};
     use crate::data::{
         ActiveMetadata, DataIndividualId, MetadataEventId, MetadataOperation, MetadataValue,
         PassiveMetadata,
@@ -907,20 +873,21 @@ mod tests {
 
     #[test]
     fn placement_maps_data_individual_shards_to_ipto_instances() {
-        let placement = IptoPlacement::new(vec![
-            IptoInstanceId::from("ipto-a"),
-            IptoInstanceId::from("ipto-b"),
-        ])
+        let placement = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![
+                IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 64).unwrap(),
+                IptoPlacementSlot::new(IptoInstanceId::from("ipto-b"), 64).unwrap(),
+            ],
+            vec![],
+        )
         .unwrap();
 
-        assert_eq!(
-            placement.resolve(DataIndividualShardId(0)).unwrap(),
-            IptoInstanceId::from("ipto-a")
-        );
-        assert_eq!(
-            placement.resolve(DataIndividualShardId(3)).unwrap(),
-            IptoInstanceId::from("ipto-b")
-        );
+        let target = placement.resolve(DataIndividualShardId(0)).unwrap();
+        assert!(target.as_str() == "ipto-a" || target.as_str() == "ipto-b");
+
+        let target = placement.resolve(DataIndividualShardId(3)).unwrap();
+        assert!(target.as_str() == "ipto-a" || target.as_str() == "ipto-b");
     }
 
     #[test]
@@ -934,7 +901,7 @@ mod tests {
             .with_active_metadata(
                 ActiveMetadata::new().insert("mask.customer.email", MetadataValue::Boolean(true)),
             );
-        let placement = IptoPlacement::new(vec![IptoInstanceId::from("ipto-a")]).unwrap();
+        let placement = sample_placement_map();
         let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
@@ -1269,7 +1236,7 @@ mod tests {
                 "mask.customer.email",
                 MetadataValue::StringList(vec![String::from("customer.email")]),
             ));
-        let placement = IptoPlacement::new(vec![IptoInstanceId::from("ipto-a")]).unwrap();
+        let placement = sample_placement_map();
         let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
@@ -1277,6 +1244,15 @@ mod tests {
             .map_field("mask.customer.email", "attr:provenance.masked_field");
 
         IptoWritePayload::from_event(&event, &placement, &mapping).unwrap()
+    }
+
+    fn sample_placement_map() -> IptoPlacementMap {
+        IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+            vec![],
+        )
+        .unwrap()
     }
 
     fn temp_segment_path(name: &str) -> PathBuf {

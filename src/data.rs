@@ -75,6 +75,26 @@ string_id!(IdempotencyKey);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DataIndividualShardId(pub u64);
 
+impl DataIndividualShardId {
+    /// Derive a shard ID from a stable data-individual identity.
+    ///
+    /// Uses a deterministic 64-bit hash of the identity string so shard IDs
+    /// are uniformly distributed across the u64 space. This works well with
+    /// consistent-hash ring placement.
+    ///
+    /// Callers may still assign an explicit `DataIndividualShardId` when
+    /// the domain placement key carries business meaning (e.g. scoping all
+    /// data for a tenant to a dedicated shard range).
+    pub fn from_data_individual(data_individual_id: &DataIndividualId) -> Self {
+        let mut state = 0xcbf2_9ce4_8422_2325u64;
+        for byte in data_individual_id.as_str().as_bytes() {
+            state ^= u64::from(*byte);
+            state = state.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Self(state)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MetadataFieldName(String);
 

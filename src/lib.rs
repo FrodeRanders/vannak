@@ -37,8 +37,8 @@ pub mod storage;
 
 pub use cluster::{
     CheckpointEpoch, ClusterControlCommand, ClusterControlError, ClusterControlState,
-    IptoPlacementMap, IptoPlacementRange, LeaseEpoch, MetadataOutboxCheckpoint, NodeId,
-    PlacementEpoch, WriterLease,
+    IptoPlacementMap, IptoPlacementRange, IptoPlacementRing, IptoPlacementSlot, LeaseEpoch,
+    MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
 };
 pub use data::{
     ActiveMetadata, DataIndividualId, DataIndividualMetadataEvent, DataIndividualShardId,
@@ -49,7 +49,7 @@ pub use index::{HotIndex, IngestOutcome};
 pub use ingest::{EventId, EventTimestamp, IngestError, PipelineEvent, SourceId, SourceSequence};
 pub use ipto::{
     DurableOutboxEnqueueResult, IptoAttributeName, IptoInstanceId, IptoMapping,
-    IptoPayloadDecodeError, IptoPlacement, IptoPlacementError, IptoWriteError, IptoWritePayload,
+    IptoPayloadDecodeError, IptoWriteError, IptoWritePayload,
     IptoWriter, MetadataOutbox, MetadataOutboxDeliveryResult, MetadataOutboxDrainSummary,
     MetadataOutboxEntry, MetadataOutboxReplay, MetadataOutboxReplaySummary, MetadataOutboxSnapshot,
     MetadataOutboxStorageError, OutboxEnqueueResult, OutboxStatus, SegmentBackedMetadataOutbox,
