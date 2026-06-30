@@ -22,9 +22,7 @@
 //! PostgreSQL-backed repositories.
 
 use crate::NodeId;
-use crate::cluster::{
-    CheckpointEpoch, ClusterControlError, IptoPlacementMap, MetadataOutboxCheckpoint,
-};
+use crate::cluster::{CheckpointEpoch, MetadataOutboxCheckpoint};
 use crate::data::{
     DataIndividualMetadataEvent, DataIndividualShardId, IdempotencyKey, MetadataFieldName,
     MetadataValue,
@@ -137,9 +135,9 @@ pub struct IptoWritePayload {
 impl IptoWritePayload {
     pub fn from_event(
         event: &DataIndividualMetadataEvent,
-        placement: &IptoPlacementMap,
+        target: &IptoInstanceId,
         mapping: &IptoMapping,
-    ) -> Result<Self, ClusterControlError> {
+    ) -> Self {
         let mut attributes = BTreeMap::new();
         for (field, value) in event.passive_metadata().fields() {
             if let Some(attribute) = mapping.attribute_for(field) {
@@ -152,19 +150,12 @@ impl IptoWritePayload {
             }
         }
 
-        let target = placement
-            .resolve(event.data_individual_shard_id())
-            .cloned()
-            .ok_or(ClusterControlError::NoShardTarget {
-                shard_id: event.data_individual_shard_id(),
-            })?;
-
-        Ok(Self {
-            target,
+        Self {
+            target: target.clone(),
             idempotency_key: event.idempotency_key().clone(),
             mapping_version: mapping.version().to_string(),
             attributes,
-        })
+        }
     }
 
     /// Encodes this payload for append-only outbox segment storage.
@@ -859,7 +850,7 @@ impl<'a> DecodeCursor<'a> {
 mod tests {
     use super::*;
     use crate::NodeId;
-    use crate::cluster::{IptoPlacementSlot, PlacementEpoch};
+    use crate::cluster::{IptoPlacementMap, IptoPlacementSlot, PlacementEpoch};
     use crate::data::{
         ActiveMetadata, DataIndividualId, MetadataEventId, MetadataOperation, MetadataValue,
         PassiveMetadata,
@@ -901,13 +892,13 @@ mod tests {
             .with_active_metadata(
                 ActiveMetadata::new().insert("mask.customer.email", MetadataValue::Boolean(true)),
             );
-        let placement = sample_placement_map();
         let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
             .map_field("mask.customer.email", "attr:provenance.masked_field");
 
-        let payload = IptoWritePayload::from_event(&event, &placement, &mapping).unwrap();
+        let target = IptoInstanceId::from("ipto-a");
+        let payload = IptoWritePayload::from_event(&event, &target, &mapping);
         assert_eq!(payload.target, IptoInstanceId::from("ipto-a"));
         assert_eq!(payload.attributes.len(), 3);
 
@@ -1236,23 +1227,13 @@ mod tests {
                 "mask.customer.email",
                 MetadataValue::StringList(vec![String::from("customer.email")]),
             ));
-        let placement = sample_placement_map();
         let mapping = IptoMapping::new("v1")
             .map_field("metadata.source_system", "attr:provenance.source_system")
             .map_field("metadata.size_bytes", "attr:provenance.size_bytes")
             .map_field("metadata.received_at", "attr:provenance.received_at")
             .map_field("mask.customer.email", "attr:provenance.masked_field");
 
-        IptoWritePayload::from_event(&event, &placement, &mapping).unwrap()
-    }
-
-    fn sample_placement_map() -> IptoPlacementMap {
-        IptoPlacementMap::new(
-            PlacementEpoch(1),
-            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
-            vec![],
-        )
-        .unwrap()
+        IptoWritePayload::from_event(&event, &IptoInstanceId::from("ipto-a"), &mapping)
     }
 
     fn temp_segment_path(name: &str) -> PathBuf {

@@ -355,21 +355,10 @@ fn full_ingest_index_outbox_ipto_flow() {
         .map_field("vannak:environmentId", "vannak:environmentId")
         .map_field("vannak:activityId", "vannak:activityId");
 
-    // Create a placement map for the write payloads
-    let placement = vannak::cluster::IptoPlacementMap::new(
-        vannak::cluster::PlacementEpoch(1),
-        vec![vannak::cluster::IptoPlacementSlot::new(
-            IptoInstanceId::from("unused"),
-            1,
-        )
-        .unwrap()],
-        vec![],
-    )
-    .unwrap();
+    let target = IptoInstanceId::from("ipto-a");
 
     for event in &metadata_events {
-        let payload = IptoWritePayload::from_event(event, &placement, &mapping)
-            .expect("payload construction should succeed");
+        let payload = IptoWritePayload::from_event(event, &target, &mapping);
         assert!(
             matches!(
                 outbox.enqueue(payload),
@@ -416,7 +405,7 @@ fn full_ingest_index_outbox_ipto_flow() {
 
     // --- 9. Verify idempotency ---
     // Re-enqueuing the same payload should be detected as duplicate.
-    let dup_payload = IptoWritePayload::from_event(&metadata_events[0], &placement, &mapping).unwrap();
+    let dup_payload = IptoWritePayload::from_event(&metadata_events[0], &target, &mapping);
     assert!(matches!(
         outbox.enqueue(dup_payload),
         vannak::ipto::OutboxEnqueueResult::Duplicate

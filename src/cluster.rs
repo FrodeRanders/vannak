@@ -288,10 +288,6 @@ impl IptoPlacementMap {
         &self.overrides
     }
 
-    pub fn ring(&self) -> &IptoPlacementRing {
-        &self.ring
-    }
-
     pub fn instances(&self) -> Vec<IptoInstanceId> {
         self.ring.instances()
     }
@@ -597,9 +593,6 @@ pub enum ClusterControlError {
     ZeroVnodes {
         instance: String,
     },
-    NoShardTarget {
-        shard_id: DataIndividualShardId,
-    },
     InvalidPlacementRange {
         start: DataIndividualShardId,
         end: DataIndividualShardId,
@@ -645,11 +638,6 @@ impl fmt::Display for ClusterControlError {
                 f,
                 "Ipto placement slot for '{}' must have at least one virtual node",
                 instance
-            ),
-            Self::NoShardTarget { shard_id } => write!(
-                f,
-                "no Ipto instance resolved for shard {} in the current placement map",
-                shard_id.0
             ),
             Self::InvalidPlacementRange { start, end } => write!(
                 f,
