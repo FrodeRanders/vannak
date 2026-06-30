@@ -70,10 +70,10 @@ fn resolve_dns_srv(service: &str, my_peer_id: &str) -> Vec<String> {
                             continue;
                         }
                         let addr_str = format!("{hostname}:{port}");
-                        if let Ok(mut addrs) = addr_str.to_socket_addrs() {
-                            if let Some(addr) = addrs.next() {
-                                peers.push(format!("{peer_id}@{addr}"));
-                            }
+                        if let Ok(mut addrs) = addr_str.to_socket_addrs()
+                            && let Some(addr) = addrs.next()
+                        {
+                            peers.push(format!("{peer_id}@{addr}"));
                         }
                     }
                 }
