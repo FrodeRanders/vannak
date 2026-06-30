@@ -18,5 +18,5 @@ RUN cargo build --release --features node --bin vannak-node
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends dnsutils && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/vannak-node /app/vannak-node
-EXPOSE 7000
+EXPOSE 10081
 ENTRYPOINT ["/app/vannak-node"]

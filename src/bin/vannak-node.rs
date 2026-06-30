@@ -199,7 +199,7 @@ fn main() {
             process::exit(1);
         }
         let host = &args[2];
-        let port: u16 = args[3].parse().unwrap_or(7000);
+        let port: u16 = args[3].parse().unwrap_or(10081);
         probe_node(host, port);
         return;
     }
@@ -211,7 +211,7 @@ fn main() {
         }
         let service = &args[2];
         let host = &args[3];
-        let port: u16 = args[4].parse().unwrap_or(7000);
+        let port: u16 = args[4].parse().unwrap_or(10081);
         let peer_id = &args[5];
         let data_dir = &args[6];
         let peers = resolve_dns_srv(service);
@@ -221,7 +221,7 @@ fn main() {
         (host.clone(), port, peer_id.clone(), data_dir.clone(), peers)
     } else if args.len() >= 6 {
         let host = &args[1];
-        let port: u16 = args[2].parse().unwrap_or(7000);
+        let port: u16 = args[2].parse().unwrap_or(10081);
         let peer_id = &args[3];
         let data_dir = &args[4];
         let peers: Vec<String> = args[5..].to_vec();

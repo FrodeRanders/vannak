@@ -32,7 +32,7 @@ services:
     dns: [10.77.0.10]
     volumes:
       - node-1-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-1 /data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-1 /data
 
   node-2:
     build: .
@@ -45,7 +45,7 @@ services:
     dns: [10.77.0.10]
     volumes:
       - node-2-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-2 /data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-2 /data
 
   node-3:
     build: .
@@ -58,7 +58,7 @@ services:
     dns: [10.77.0.10]
     volumes:
       - node-3-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 7000 vannak-3 /data
+    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-3 /data
 
 networks:
   raft-net:
