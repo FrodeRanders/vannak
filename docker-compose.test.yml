@@ -23,8 +23,10 @@ services:
       - ../ipto/shared/db/postgresql/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
       - ../ipto/shared/db/postgresql/procedures.sql:/docker-entrypoint-initdb.d/01_procedures.sql:ro
       - ../ipto/shared/db/postgresql/boot.sql:/docker-entrypoint-initdb.d/02_boot.sql:ro
+    restart: "no"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U repo -d repo"]
       interval: 2s
       timeout: 5s
       retries: 30
+      start_period: 10s

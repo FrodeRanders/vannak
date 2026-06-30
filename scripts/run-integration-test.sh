@@ -56,7 +56,11 @@ trap compose_down EXIT
 # ---------------------------------------------------------------------------
 echo "==> Starting PostgreSQL (port $VANNAK_PG_PORT)..."
 docker compose -f "$PG_COMPOSE" down -v 2>/dev/null || true
-docker compose -f "$PG_COMPOSE" up -d --wait postgres
+if ! docker compose -f "$PG_COMPOSE" up -d --wait postgres; then
+    echo "ERROR: PostgreSQL container failed to start. Logs:"
+    docker compose -f "$PG_COMPOSE" logs postgres 2>/dev/null || true
+    exit 1
+fi
 
 if [ "$NO_BUILD" = false ]; then
     echo "==> Building Vannak with ipto-writer feature..."
