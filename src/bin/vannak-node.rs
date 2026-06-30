@@ -77,15 +77,7 @@ fn parse_peer_spec(spec: &str) -> Option<(String, SocketAddr)> {
 }
 
 fn listen_addr(host: &str, port: u16) -> SocketAddr {
-    let bind_host = if cfg!(target_os = "linux") {
-        match host {
-            "0.0.0.0" | "127.0.0.1" | "::1" | "localhost" => "[::]",
-            _ => host,
-        }
-    } else {
-        host
-    };
-    SocketAddr::from_str(&format!("{}:{}", bind_host, port)).unwrap()
+    SocketAddr::from_str(&format!("{}:{}", host, port)).unwrap()
 }
 
 fn run_server(
