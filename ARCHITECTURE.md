@@ -919,12 +919,16 @@ These policies should be typed configuration, not scattered conditionals.
 
 ### Phase 6: Raft Control Plane
 
-- Add node identity and membership.
+- Add node identity and membership. [done: `NodeId`, `AddNode`/`RemoveNode` commands]
 - Add shard/partition ownership.
-- Replicate Ipto placement map.
-- Replicate sealed segment manifests.
-- Replicate metadata outbox checkpoint manifests.
+- Replicate Ipto placement ring configuration. [done: `SetIptoPlacementMap` command,
+  placement history with epoch-based query fallback]
+- Replicate sealed segment manifests. [done: `RecordSealedSegment` command]
+- Replicate metadata outbox checkpoint manifests. [done: `RecordOutboxCheckpoint` command]
 - Replicate checkpoint manifests.
+- Add Raft state machine adapter. [done: `ClusterStateMachine` implements
+  `graft_core::StateMachine` and `QueryableStateMachine` behind `raft` feature,
+  with JSON command encoding, snapshot/restore, and 5 query types]
 - Add recovery flow from committed manifests.
 
 ### Phase 7: Cluster Operation

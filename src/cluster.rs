@@ -232,6 +232,7 @@ impl IptoPlacementRange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IptoPlacementMap {
     pub epoch: PlacementEpoch,
+    slots: Vec<IptoPlacementSlot>,
     ring: IptoPlacementRing,
     overrides: Vec<IptoPlacementRange>,
 }
@@ -264,6 +265,7 @@ impl IptoPlacementMap {
         let ring = IptoPlacementRing::new(epoch, &slots);
         Ok(Self {
             epoch,
+            slots,
             ring,
             overrides: sorted_overrides,
         })
@@ -279,7 +281,7 @@ impl IptoPlacementMap {
     }
 
     pub fn slots(&self) -> &[IptoPlacementSlot] {
-        &[]
+        &self.slots
     }
 
     pub fn overrides(&self) -> &[IptoPlacementRange] {
@@ -480,8 +482,18 @@ impl ClusterControlState {
         self.placement_maps.iter()
     }
 
+    pub fn writer_leases(&self) -> &BTreeMap<IptoInstanceId, WriterLease> {
+        &self.writer_leases
+    }
+
     pub fn writer_lease(&self, target: &IptoInstanceId) -> Option<&WriterLease> {
         self.writer_leases.get(target)
+    }
+
+    pub fn outbox_checkpoints(
+        &self,
+    ) -> &BTreeMap<(DataIndividualShardId, IptoInstanceId), MetadataOutboxCheckpoint> {
+        &self.outbox_checkpoints
     }
 
     pub fn outbox_checkpoint(
@@ -490,6 +502,10 @@ impl ClusterControlState {
         target: &IptoInstanceId,
     ) -> Option<&MetadataOutboxCheckpoint> {
         self.outbox_checkpoints.get(&(shard_id, target.clone()))
+    }
+
+    pub fn sealed_segments(&self) -> &BTreeMap<SegmentId, SegmentManifest> {
+        &self.sealed_segments
     }
 
     pub fn sealed_segment(&self, segment_id: &SegmentId) -> Option<&SegmentManifest> {

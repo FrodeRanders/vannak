@@ -34,6 +34,8 @@ pub mod metadata;
 pub mod observability;
 pub mod process;
 pub mod query;
+#[cfg(feature = "raft")]
+pub mod raft_sm;
 pub mod runtime;
 pub mod storage;
 
