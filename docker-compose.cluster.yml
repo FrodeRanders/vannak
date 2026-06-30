@@ -1,40 +1,23 @@
-# Docker Compose for a 3-node Vannak Raft cluster with DNS-based auto-discovery.
+# Docker Compose for a 3-node Vannak Raft cluster.
 #
-# Mirrors the Raft project's compose-srv-rust.yml pattern. CoreDNS serves
-# static SRV records so nodes discover each other via DNS at startup.
+# Nodes discover each other via explicit peer specs using Docker's internal
+# DNS (container name → IP resolution). No CoreDNS or static IPs needed.
 #
 # Usage:
 #   docker compose -f docker-compose.cluster.yml build
 #   docker compose -f docker-compose.cluster.yml up -d
-#   # Wait for leader election, then verify cluster state
 #   docker compose -f docker-compose.cluster.yml down -v
 
 services:
-  dns:
-    image: coredns/coredns:latest
-    container_name: vannak-dns
-    networks:
-      raft-net:
-        ipv4_address: 10.77.0.10
-    volumes:
-      - ./dns/Corefile:/Corefile:ro
-      - ./dns/vannak.local.db:/vannak.local.db:ro
-    command: -conf /Corefile
-
   vannak-1:
     build:
       context: ..
       dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-1
-    depends_on: [dns]
-    networks:
-      raft-net:
-        ipv4_address: 10.77.0.11
-    dns: [10.77.0.10]
     volumes:
       - vannak-1-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-1 /data
+    command: 0.0.0.0 10081 vannak-1 /data vannak-2@vannak-2:10081 vannak-3@vannak-3:10081
 
   vannak-2:
     build:
@@ -42,14 +25,9 @@ services:
       dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-2
-    depends_on: [vannak-1]
-    networks:
-      raft-net:
-        ipv4_address: 10.77.0.12
-    dns: [10.77.0.10]
     volumes:
       - vannak-2-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-2 /data
+    command: 0.0.0.0 10081 vannak-2 /data vannak-1@vannak-1:10081 vannak-3@vannak-3:10081
 
   vannak-3:
     build:
@@ -57,21 +35,9 @@ services:
       dockerfile: vannak/Dockerfile
     image: vannak-node:local
     container_name: vannak-3
-    depends_on: [vannak-1]
-    networks:
-      raft-net:
-        ipv4_address: 10.77.0.13
-    dns: [10.77.0.10]
     volumes:
       - vannak-3-data:/data
-    command: --srv _vannak._tcp.vannak.local 0.0.0.0 10081 vannak-3 /data
-
-networks:
-  raft-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 10.77.0.0/24
+    command: 0.0.0.0 10081 vannak-3 /data vannak-1@vannak-1:10081 vannak-2@vannak-2:10081
 
 volumes:
   vannak-1-data:

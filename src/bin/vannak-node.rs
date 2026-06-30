@@ -91,8 +91,10 @@ fn resolve_dns_srv(service: &str, my_peer_id: &str) -> Vec<String> {
 
 fn parse_peer_spec(spec: &str) -> Option<(String, SocketAddr)> {
     let (id_part, addr_part) = spec.split_once('@')?;
-    let addr = SocketAddr::from_str(addr_part).ok()?;
-    Some((id_part.to_string(), addr))
+    if let Ok(addr) = SocketAddr::from_str(addr_part) {
+        return Some((id_part.to_string(), addr));
+    }
+    addr_part.to_socket_addrs().ok()?.next().map(|addr| (id_part.to_string(), addr))
 }
 
 fn listen_addr(host: &str, port: u16) -> SocketAddr {
@@ -107,15 +109,7 @@ fn run_server(
     peers: &[String],
 ) -> Result<(), String> {
     let bind_addr = listen_addr(host, port);
-
-    // Resolve our own address for the Raft peer identity (can't use 0.0.0.0).
-    let peer_addr = format!("{peer_id}.vannak.local:{port}")
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next())
-        .unwrap_or(bind_addr);
-
-    let me = Peer::voter(peer_id.to_string(), peer_addr);
+    let me = Peer::voter(peer_id.to_string(), bind_addr);
 
     let mut peer_addrs: HashMap<String, SocketAddr> = HashMap::new();
     let mut members = vec![me.clone()];
