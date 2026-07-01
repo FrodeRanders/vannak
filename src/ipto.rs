@@ -96,6 +96,7 @@ impl From<String> for IptoAttributeName {
 pub struct IptoMapping {
     version: String,
     fields: BTreeMap<MetadataFieldName, IptoAttributeName>,
+    relations_enabled: bool,
 }
 
 impl IptoMapping {
@@ -103,6 +104,7 @@ impl IptoMapping {
         Self {
             version: version.into(),
             fields: BTreeMap::new(),
+            relations_enabled: true,
         }
     }
 
@@ -112,6 +114,11 @@ impl IptoMapping {
         attribute: impl Into<IptoAttributeName>,
     ) -> Self {
         self.fields.insert(field.into(), attribute.into());
+        self
+    }
+
+    pub fn without_relations(mut self) -> Self {
+        self.relations_enabled = false;
         self
     }
 
@@ -152,14 +159,13 @@ impl IptoWritePayload {
         }
 
         // Sentinel PROV-O relation attributes from event identity fields.
-        // These carry structured identity data as regular attributes so the
-        // writer can detect them and emit relation units without changing the
-        // binary codec.
-        if let Some(ref activity_id) = event.activity_id() {
-            attributes.insert(
-                IptoAttributeName::from("vannak:relation:wasGeneratedBy"),
-                MetadataValue::string(activity_id.as_str()),
-            );
+        if mapping.relations_enabled {
+            if let Some(ref activity_id) = event.activity_id() {
+                attributes.insert(
+                    IptoAttributeName::from("vannak:relation:wasGeneratedBy"),
+                    MetadataValue::string(activity_id.as_str()),
+                );
+            }
         }
 
         Self {

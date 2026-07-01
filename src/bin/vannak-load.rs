@@ -483,7 +483,8 @@ fn run_single_threaded(
                 .map_field("vannak:processInstanceId", "vannak:processInstanceId")
                 .map_field("vannak:tenantId", "vannak:tenantId")
                 .map_field("vannak:environmentId", "vannak:environmentId")
-                .map_field("vannak:activityId", "vannak:activityId");
+                .map_field("vannak:activityId", "vannak:activityId")
+                .without_relations();
 
             for event in events {
                 let payload = IptoWritePayload::from_event(
