@@ -10,6 +10,8 @@ COPY vannak/tests/ tests/
 COPY ipto/implementations/rust/ ../ipto/implementations/rust/
 COPY ipto/shared/ ../ipto/shared/
 
+COPY sitas/ ../sitas/
+
 COPY raft/graft-rust/graft-proto/ ../raft/graft-rust/graft-proto/
 COPY raft/graft-rust/graft-core/ ../raft/graft-rust/graft-core/
 COPY raft/graft-rust/graft-storage/ ../raft/graft-rust/graft-storage/
