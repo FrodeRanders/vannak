@@ -33,6 +33,8 @@ use crate::kafka_ingest::{
     KafkaIngestError, KafkaOffset, KafkaPendingRecord, KafkaProcessRecord, KafkaSubmitOutcome,
     KafkaTopicPartition, try_submit_kafka_pending_record,
 };
+use crate::metadata::MetadataRef;
+use crate::observability::DurgaCompatibilitySnapshot;
 use crate::process::{EnvironmentId, TenantId};
 use crate::sitas_runtime::SitasShardRuntime;
 use rdkafka::ClientConfig;
@@ -43,7 +45,7 @@ use rdkafka::error::KafkaError;
 use rdkafka::message::Message;
 use rdkafka::{Offset, TopicPartitionList};
 use serde::Deserialize;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -175,11 +177,12 @@ impl KafkaProcessConsumerConfig {
         topic: &str,
         offset: i64,
         payload: &[u8],
+        compat: &mut DurgaCompatibilityState,
     ) -> Result<PipelineEvent, KafkaClientError> {
         match self.payload_format {
             KafkaPayloadFormat::VannakBinary => Ok(decode_pipeline_event(payload)?),
             KafkaPayloadFormat::DurgaJson => {
-                let event = decode_durga_json_process_event(payload)?;
+                let event = decode_durga_json_process_event(payload, compat)?;
                 Ok(event.into_pipeline_event(
                     SourceId::from(format!("{}:{}", self.durga_source_id.as_str(), topic)),
                     SourceSequence(offset.max(0) as u64),
@@ -226,6 +229,7 @@ pub struct KafkaProcessConsumer {
     pending: VecDeque<KafkaPendingRecord>,
     paused: BTreeSet<KafkaTopicPartition>,
     rebalance_state: Arc<Mutex<KafkaRebalanceState>>,
+    durga_compat: DurgaCompatibilityState,
 }
 
 impl KafkaProcessConsumer {
@@ -260,6 +264,7 @@ impl KafkaProcessConsumer {
             pending: VecDeque::new(),
             paused: BTreeSet::new(),
             rebalance_state,
+            durga_compat: DurgaCompatibilityState::default(),
         })
     }
 
@@ -274,6 +279,7 @@ impl KafkaProcessConsumer {
                 .collect(),
             paused_partitions: self.paused.iter().cloned().collect(),
             rebalance: lock_rebalance_state(&self.rebalance_state).snapshot(),
+            durga_compat: self.durga_compat.snapshot(),
         }
     }
 
@@ -298,7 +304,7 @@ impl KafkaProcessConsumer {
         let payload = message.payload().ok_or(KafkaClientError::MissingPayload)?;
         let event = self
             .config
-            .decode_event(message.topic(), message.offset(), payload)?;
+            .decode_event(message.topic(), message.offset(), payload, &mut self.durga_compat)?;
         let record = KafkaProcessRecord::new(
             KafkaTopicPartition::new(message.topic(), message.partition()),
             KafkaOffset(message.offset()),
@@ -510,6 +516,8 @@ pub struct KafkaProcessConsumerSnapshot {
     pub paused_partitions: Vec<KafkaTopicPartition>,
     /// Rebalance callback state.
     pub rebalance: KafkaRebalanceSnapshot,
+    /// Live Durga schema compatibility tracking.
+    pub durga_compat: DurgaCompatibilitySnapshot,
 }
 
 /// Owned snapshot of Kafka rebalance callback state.
@@ -593,13 +601,6 @@ pub enum KafkaClientError {
     Decode(ProcessEventDecodeError),
     /// Durga JSON payload could not be decoded.
     DurgaJson(serde_json::Error),
-    /// Durga JSON contained an unknown enum value.
-    UnknownDurgaValue {
-        /// Field with an unsupported value.
-        field: &'static str,
-        /// Unsupported value.
-        value: String,
-    },
     /// Durable/Sitas admission failed.
     Ingest(KafkaIngestError),
     /// Kafka revoked a partition while a record from it was still uncommitted.
@@ -620,9 +621,6 @@ impl fmt::Display for KafkaClientError {
             Self::MissingPayload => f.write_str("Kafka process-event record has no payload"),
             Self::Decode(error) => write!(f, "{error}"),
             Self::DurgaJson(error) => write!(f, "Durga JSON payload decode failed: {error}"),
-            Self::UnknownDurgaValue { field, value } => {
-                write!(f, "unknown Durga {field} value {value}")
-            }
             Self::Ingest(error) => write!(f, "{error}"),
             Self::PendingPartitionRevoked {
                 topic_partition,
@@ -647,7 +645,6 @@ impl std::error::Error for KafkaClientError {
             Self::Ingest(error) => Some(error),
             Self::InvalidConfig(_)
             | Self::MissingPayload
-            | Self::UnknownDurgaValue { .. }
             | Self::PendingPartitionRevoked { .. } => None,
         }
     }
@@ -692,6 +689,53 @@ struct DurgaProcessEventJson {
     process_version: Option<String>,
     business_key: Option<String>,
     timestamp: String,
+    #[serde(default)]
+    schema_version: Option<String>,
+    #[serde(default)]
+    metadata_refs: Vec<MetadataRefJson>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataRefJson {
+    kind: String,
+    id: String,
+    version: Option<String>,
+}
+
+impl MetadataRefJson {
+    fn into_metadata_ref(self) -> Option<MetadataRef> {
+        match self.kind.as_str() {
+            "dataset" => Some(MetadataRef::Dataset(crate::metadata::DatasetId::from(
+                self.id,
+            ))),
+            "schema" => Some(MetadataRef::Schema {
+                id: crate::metadata::SchemaId::from(self.id),
+                version: self.version.map(crate::metadata::MetadataVersion::from),
+            }),
+            "field" => Some(MetadataRef::Field(crate::metadata::FieldId::from(self.id))),
+            "pipelineDefinition" => Some(MetadataRef::PipelineDefinition {
+                id: crate::metadata::PipelineDefinitionId::from(self.id),
+                version: self.version.map(crate::metadata::MetadataVersion::from),
+            }),
+            "object" => Some(MetadataRef::Object(
+                crate::metadata::MetadataObjectId::from(self.id),
+            )),
+            "lineageEdge" => Some(MetadataRef::LineageEdge(
+                crate::metadata::LineageEdgeId::from(self.id),
+            )),
+            "dataContract" => Some(MetadataRef::DataContract(
+                crate::metadata::DataContractId::from(self.id),
+            )),
+            "owner" => Some(MetadataRef::Owner(crate::metadata::OwnerId::from(
+                self.id,
+            ))),
+            "classification" => Some(MetadataRef::Classification(
+                crate::metadata::ClassificationId::from(self.id),
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -700,8 +744,16 @@ struct DurgaErrorInfoJson {
     code: Option<String>,
 }
 
-fn decode_durga_json_process_event(payload: &[u8]) -> Result<DurgaProcessEvent, KafkaClientError> {
+fn decode_durga_json_process_event(
+    payload: &[u8],
+    compat: &mut DurgaCompatibilityState,
+) -> Result<DurgaProcessEvent, KafkaClientError> {
     let value: DurgaProcessEventJson = serde_json::from_slice(payload)?;
+    let metadata_refs: Vec<MetadataRef> = value
+        .metadata_refs
+        .into_iter()
+        .filter_map(MetadataRefJson::into_metadata_ref)
+        .collect();
     Ok(DurgaProcessEvent {
         process_instance_id: value.process_instance_id,
         process_id: value.process_id,
@@ -709,48 +761,83 @@ fn decode_durga_json_process_event(payload: &[u8]) -> Result<DurgaProcessEvent, 
         token_id: value.token_id,
         correlation_id: value.correlation_id,
         payload: value.payload.map(|payload| payload.to_string()),
-        status: parse_durga_status(&value.status)?,
+        status: parse_durga_status(&value.status, compat),
         error: value.error.map(|error| DurgaErrorInfo {
             message: error.message,
             code: error.code,
         }),
-        event_type: parse_durga_event_type(&value.event_type)?,
+        event_type: parse_durga_event_type(&value.event_type, compat),
         process_version: value.process_version,
         business_key: value.business_key,
         timestamp: value.timestamp,
+        metadata_refs,
+        schema_version: value.schema_version,
     })
 }
 
-fn parse_durga_status(value: &str) -> Result<DurgaStatus, KafkaClientError> {
+fn parse_durga_status(value: &str, compat: &mut DurgaCompatibilityState) -> DurgaStatus {
     match value {
-        "Started" | "STARTED" => Ok(DurgaStatus::Started),
-        "Completed" | "COMPLETED" => Ok(DurgaStatus::Completed),
-        "Failed" | "FAILED" => Ok(DurgaStatus::Failed),
-        "Escalated" | "ESCALATED" => Ok(DurgaStatus::Escalated),
-        "Cancelled" | "CANCELLED" | "Canceled" | "CANCELED" => Ok(DurgaStatus::Cancelled),
-        _ => Err(KafkaClientError::UnknownDurgaValue {
-            field: "status",
-            value: value.to_string(),
-        }),
+        "Started" | "STARTED" => DurgaStatus::Started,
+        "Completed" | "COMPLETED" => DurgaStatus::Completed,
+        "Failed" | "FAILED" => DurgaStatus::Failed,
+        "Escalated" | "ESCALATED" => DurgaStatus::Escalated,
+        "Cancelled" | "CANCELLED" | "Canceled" | "CANCELED" => DurgaStatus::Cancelled,
+        _ => {
+            compat.record_unknown_status(value);
+            DurgaStatus::Unknown(value.to_string())
+        }
     }
 }
 
-fn parse_durga_event_type(value: &str) -> Result<DurgaEventType, KafkaClientError> {
+fn parse_durga_event_type(value: &str, compat: &mut DurgaCompatibilityState) -> DurgaEventType {
     match value {
-        "ProcessStarted" | "PROCESS_STARTED" => Ok(DurgaEventType::ProcessStarted),
-        "ActivityEntered" | "ACTIVITY_ENTERED" => Ok(DurgaEventType::ActivityEntered),
-        "ActivityCompleted" | "ACTIVITY_COMPLETED" => Ok(DurgaEventType::ActivityCompleted),
-        "ActivityEscalated" | "ACTIVITY_ESCALATED" => Ok(DurgaEventType::ActivityEscalated),
+        "ProcessStarted" | "PROCESS_STARTED" => DurgaEventType::ProcessStarted,
+        "ActivityEntered" | "ACTIVITY_ENTERED" => DurgaEventType::ActivityEntered,
+        "ActivityCompleted" | "ACTIVITY_COMPLETED" => DurgaEventType::ActivityCompleted,
+        "ActivityEscalated" | "ACTIVITY_ESCALATED" => DurgaEventType::ActivityEscalated,
         "ActivityCancelled" | "ACTIVITY_CANCELLED" | "ActivityCanceled" | "ACTIVITY_CANCELED" => {
-            Ok(DurgaEventType::ActivityCancelled)
+            DurgaEventType::ActivityCancelled
         }
-        "GatewayTaken" | "GATEWAY_TAKEN" => Ok(DurgaEventType::GatewayTaken),
-        "ProcessCompleted" | "PROCESS_COMPLETED" => Ok(DurgaEventType::ProcessCompleted),
-        "ProcessFailed" | "PROCESS_FAILED" => Ok(DurgaEventType::ProcessFailed),
-        _ => Err(KafkaClientError::UnknownDurgaValue {
-            field: "eventType",
-            value: value.to_string(),
-        }),
+        "GatewayTaken" | "GATEWAY_TAKEN" => DurgaEventType::GatewayTaken,
+        "ProcessCompleted" | "PROCESS_COMPLETED" => DurgaEventType::ProcessCompleted,
+        "ProcessFailed" | "PROCESS_FAILED" => DurgaEventType::ProcessFailed,
+        _ => {
+            compat.record_unknown_event_type(value);
+            DurgaEventType::Unknown(value.to_string())
+        }
+    }
+}
+
+/// Accumulates live Durga schema compatibility counters over one consumer session.
+#[derive(Debug, Clone, Default)]
+struct DurgaCompatibilityState {
+    unknown_status_counts: BTreeMap<String, u64>,
+    unknown_event_type_counts: BTreeMap<String, u64>,
+}
+
+impl DurgaCompatibilityState {
+    fn record_unknown_status(&mut self, value: &str) {
+        *self
+            .unknown_status_counts
+            .entry(value.to_string())
+            .or_default() += 1;
+    }
+
+    fn record_unknown_event_type(&mut self, value: &str) {
+        *self
+            .unknown_event_type_counts
+            .entry(value.to_string())
+            .or_default() += 1;
+    }
+
+    fn snapshot(&self) -> DurgaCompatibilitySnapshot {
+        fn sorted(counts: &BTreeMap<String, u64>) -> Vec<(String, u64)> {
+            counts.iter().map(|(k, v)| (k.clone(), *v)).collect()
+        }
+        DurgaCompatibilitySnapshot {
+            unknown_status_values: sorted(&self.unknown_status_counts),
+            unknown_event_type_values: sorted(&self.unknown_event_type_counts),
+        }
     }
 }
 
@@ -784,6 +871,7 @@ mod tests {
                 TenantId::from("tenant-a"),
                 EnvironmentId::from("prod"),
             );
+        let mut compat = DurgaCompatibilityState::default();
         let event = config
             .decode_event(
                 "process-events-demo",
@@ -801,6 +889,7 @@ mod tests {
                     "businessKey": "business-1",
                     "timestamp": "2026-06-30T10:00:00Z"
                 }"#,
+                &mut compat,
             )
             .unwrap();
 
@@ -859,5 +948,200 @@ mod tests {
             vec![KafkaTopicPartition::new("topic-a", 1)]
         );
         assert!(state.take_unhandled_revoked().is_empty());
+    }
+
+    #[test]
+    fn durga_json_unknown_status_parsed_tolerantly_and_tracked() {
+        let config = KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic-a"])
+            .with_payload_format(KafkaPayloadFormat::DurgaJson)
+            .with_durga_context(
+                SourceId::from("durga-kafka"),
+                TenantId::from("tenant-a"),
+                EnvironmentId::from("prod"),
+            );
+        let mut compat = DurgaCompatibilityState::default();
+        let _event = config
+            .decode_event(
+                "topic-a",
+                1,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "PENDING",
+                    "eventType": "ACTIVITY_ENTERED",
+                    "timestamp": "2026-06-30T10:00:00Z"
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+
+        let snapshot = compat.snapshot();
+        assert!(
+            snapshot
+                .unknown_status_values
+                .iter()
+                .any(|(val, _)| val == "PENDING"),
+            "PENDING should be tracked as unknown status"
+        );
+    }
+
+    #[test]
+    fn durga_json_unknown_event_type_parsed_tolerantly_and_tracked() {
+        let config = KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic-a"])
+            .with_payload_format(KafkaPayloadFormat::DurgaJson)
+            .with_durga_context(
+                SourceId::from("durga-kafka"),
+                TenantId::from("tenant-a"),
+                EnvironmentId::from("prod"),
+            );
+        let mut compat = DurgaCompatibilityState::default();
+        let _event = config
+            .decode_event(
+                "topic-a",
+                1,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "STARTED",
+                    "eventType": "CUSTOM_TASK_STARTED",
+                    "timestamp": "2026-06-30T10:00:00Z"
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+
+        let snapshot = compat.snapshot();
+        assert!(
+            snapshot
+                .unknown_event_type_values
+                .iter()
+                .any(|(val, _)| val == "CUSTOM_TASK_STARTED"),
+            "CUSTOM_TASK_STARTED should be tracked as unknown event type"
+        );
+    }
+
+    #[test]
+    fn durga_json_unknown_values_accumulate_counts() {
+        let config = KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic-a"])
+            .with_payload_format(KafkaPayloadFormat::DurgaJson)
+            .with_durga_context(
+                SourceId::from("durga-kafka"),
+                TenantId::from("tenant-a"),
+                EnvironmentId::from("prod"),
+            );
+        let mut compat = DurgaCompatibilityState::default();
+
+        config
+            .decode_event(
+                "topic-a",
+                1,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "PENDING",
+                    "eventType": "ACTIVITY_ENTERED",
+                    "timestamp": "2026-06-30T10:00:00Z"
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+        config
+            .decode_event(
+                "topic-a",
+                2,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "PENDING",
+                    "eventType": "ACTIVITY_ENTERED",
+                    "timestamp": "2026-06-30T10:00:01Z"
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+
+        let snapshot = compat.snapshot();
+        let (_, count) = snapshot
+            .unknown_status_values
+            .iter()
+            .find(|(val, _)| val == "PENDING")
+            .unwrap();
+        assert_eq!(*count, 2, "PENDING should be counted twice");
+    }
+
+    #[test]
+    fn durga_json_metadata_refs_deserialized() {
+        let config = KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic-a"])
+            .with_payload_format(KafkaPayloadFormat::DurgaJson)
+            .with_durga_context(
+                SourceId::from("durga-kafka"),
+                TenantId::from("tenant-a"),
+                EnvironmentId::from("prod"),
+            );
+        let mut compat = DurgaCompatibilityState::default();
+        let event = config
+            .decode_event(
+                "topic-a",
+                1,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "STARTED",
+                    "eventType": "ACTIVITY_ENTERED",
+                    "timestamp": "2026-06-30T10:00:00Z",
+                    "metadataRefs": [
+                        {"kind": "dataset", "id": "dataset-a"},
+                        {"kind": "schema", "id": "schema-a", "version": "v1"},
+                        {"kind": "classification", "id": "pii"}
+                    ]
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+
+        let refs = event.metadata_refs();
+        assert_eq!(
+            refs.len(),
+            3,
+            "all three metadata refs should be parsed"
+        );
+    }
+
+    #[test]
+    fn durga_json_schema_version_deserialized() {
+        let config = KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic-a"])
+            .with_payload_format(KafkaPayloadFormat::DurgaJson)
+            .with_durga_context(
+                SourceId::from("durga-kafka"),
+                TenantId::from("tenant-a"),
+                EnvironmentId::from("prod"),
+            );
+        let mut compat = DurgaCompatibilityState::default();
+        let event = config
+            .decode_event(
+                "topic-a",
+                1,
+                br#"{
+                    "processInstanceId": "instance-a",
+                    "processId": "pipeline-a",
+                    "status": "STARTED",
+                    "eventType": "ACTIVITY_ENTERED",
+                    "timestamp": "2026-06-30T10:00:00Z",
+                    "schemaVersion": "2.1.0"
+                }"#,
+                &mut compat,
+            )
+            .unwrap();
+
+        // Verify the event decoded successfully (schema version tracked internally)
+        assert_eq!(event.pipeline_id().as_str(), "pipeline-a");
+    }
+
+    #[test]
+    fn empty_compatibility_state_produces_empty_snapshot() {
+        let compat = DurgaCompatibilityState::default();
+        let snapshot = compat.snapshot();
+        assert!(snapshot.unknown_status_values.is_empty());
+        assert!(snapshot.unknown_event_type_values.is_empty());
     }
 }

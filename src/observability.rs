@@ -25,3 +25,16 @@ pub struct HotIndexSnapshot {
     pub duplicate_events: u64,
     pub rejected_events: u64,
 }
+
+/// Live Durga schema compatibility tracking.
+///
+/// Accumulated over one consumer session; reported alongside consumer
+/// snapshots so operators can detect schema drift before a new Durga version
+/// introduces a breaking contract change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DurgaCompatibilitySnapshot {
+    /// Unknown status values encountered, with occurrence counts.
+    pub unknown_status_values: Vec<(String, u64)>,
+    /// Unknown event-type values encountered, with occurrence counts.
+    pub unknown_event_type_values: Vec<(String, u64)>,
+}

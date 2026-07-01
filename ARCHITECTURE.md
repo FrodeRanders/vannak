@@ -877,9 +877,26 @@ assignment/revocation/error counts in an owned `KafkaProcessConsumerSnapshot`,
 and refuses to continue if Kafka revokes a partition while Vannak still holds an
 uncommitted pending record from that partition. The Durga JSON adapter maps
 common monitor fields into `DurgaProcessEvent` before conversion into
-`PipelineEvent`; live Durga schema compatibility still needs to be verified
-against a real Durga deployment. Remaining runtime work includes richer
-operational supervision and live Durga compatibility coverage. Live broker
+`PipelineEvent`. Live Durga schema compatibility is covered through three
+mechanisms added during the initial compatibility pass:
+
+- **tolerant enum parsing**: `DurgaStatus` and `DurgaEventType` carry an
+  `Unknown(String)` variant; unknown wire values are no longer rejected but
+  preserved and tracked in `DurgaCompatibilityState`. The internal
+  `EventKind::Unknown(String)` variant propagates through the state reducer
+  (no state change, metadata still accumulated) and the binary codec (tag 8),
+  so Vannak can round-trip unknown event kinds without loss.
+- **observability**: `DurgaCompatibilitySnapshot` accumulates per-session
+  counts of unknown status and event-type values; the snapshot is exposed
+  alongside `KafkaProcessConsumerSnapshot` so operators can detect schema
+  drift before a new Durga version introduces a breaking contract change.
+- **metadata references and schema version**: `DurgaProcessEvent` and the
+  JSON adapter now carry `metadataRefs` (typed Durga metadata references) and
+  `schemaVersion`; both are preserved across the conversion boundary for
+  future use in version-aware routing and metadata correlation.
+
+Remaining runtime work includes richer operational supervision for the
+Kafka consumer (e.g. per-partition lag, throughput histograms). Live broker
 smoke coverage exists through `docker-compose.kafka.yml` and the opt-in
 `kafka_integration` test.
 

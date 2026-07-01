@@ -22,18 +22,20 @@
 //! transport is deliberately outside this dependency-free core for now.
 
 use crate::ingest::{EventId, EventTimestamp, PipelineEvent, SourceId, SourceSequence};
+use crate::metadata::MetadataRef;
 use crate::process::{
     ActivityId, BusinessKey, CorrelationId, EnvironmentId, ErrorInfo, EventKind, EventStatus,
     PipelineId, ProcessDefinitionId, ProcessInstanceId, ProcessVersion, TenantId, TokenId,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DurgaStatus {
     Started,
     Completed,
     Failed,
     Escalated,
     Cancelled,
+    Unknown(String),
 }
 
 impl From<DurgaStatus> for EventStatus {
@@ -44,11 +46,12 @@ impl From<DurgaStatus> for EventStatus {
             DurgaStatus::Failed => EventStatus::Failed,
             DurgaStatus::Escalated => EventStatus::Escalated,
             DurgaStatus::Cancelled => EventStatus::Cancelled,
+            DurgaStatus::Unknown(_) => EventStatus::Started,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DurgaEventType {
     ProcessStarted,
     ActivityEntered,
@@ -58,6 +61,7 @@ pub enum DurgaEventType {
     GatewayTaken,
     ProcessCompleted,
     ProcessFailed,
+    Unknown(String),
 }
 
 impl From<DurgaEventType> for EventKind {
@@ -71,6 +75,7 @@ impl From<DurgaEventType> for EventKind {
             DurgaEventType::GatewayTaken => EventKind::GatewayTaken,
             DurgaEventType::ProcessCompleted => EventKind::ProcessCompleted,
             DurgaEventType::ProcessFailed => EventKind::ProcessFailed,
+            DurgaEventType::Unknown(s) => EventKind::Unknown(s),
         }
     }
 }
@@ -102,6 +107,8 @@ pub struct DurgaProcessEvent {
     pub process_version: Option<String>,
     pub business_key: Option<String>,
     pub timestamp: String,
+    pub metadata_refs: Vec<MetadataRef>,
+    pub schema_version: Option<String>,
 }
 
 impl DurgaProcessEvent {
@@ -132,6 +139,11 @@ impl DurgaProcessEvent {
             kind,
         )
         .with_status(EventStatus::from(self.status));
+
+        let metadata_refs = self.metadata_refs;
+        if !metadata_refs.is_empty() {
+            event = event.with_metadata_refs(metadata_refs);
+        }
 
         if let Some(activity_id) = self.activity_id {
             event = event.with_activity_id(ActivityId::from(activity_id));

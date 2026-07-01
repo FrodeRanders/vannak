@@ -78,7 +78,7 @@ pub enum EventStatus {
 
 /// Durga monitor event type. Keep this aligned with
 /// `org.gautelis.durga.ProcessEvent.EventType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EventKind {
     ProcessStarted,
     ActivityEntered,
@@ -88,6 +88,7 @@ pub enum EventKind {
     GatewayTaken,
     ProcessCompleted,
     ProcessFailed,
+    Unknown(String),
 }
 
 impl EventKind {
@@ -100,6 +101,7 @@ impl EventKind {
             Self::ActivityEscalated => EventStatus::Escalated,
             Self::ActivityCancelled => EventStatus::Cancelled,
             Self::ProcessFailed => EventStatus::Failed,
+            Self::Unknown(_) => EventStatus::Started,
         }
     }
 }
@@ -259,6 +261,7 @@ impl ProcessInstanceState {
                 self.retry_count += 1;
                 self.record_activity_terminal(event, ActivityState::Failed);
             }
+            EventKind::Unknown(_) => {}
         }
     }
 

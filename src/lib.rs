@@ -100,6 +100,7 @@ pub use query::{
     ProcessInstanceQuery, ProcessMetadataQuery, ProcessStatusQuery, QueryLimit, QueryResult,
     TimeRangeQuery,
 };
+pub use observability::{DurgaCompatibilitySnapshot, HotIndexSnapshot};
 pub use runtime::{
     BoundedIngestRuntime, BoundedIngestRuntimeSnapshot, IngestDrainSummary, IngestQueueSnapshot,
     LogicalShardId, QueuedIngestOutcome, RuntimeError, ShardIngestOutcome, ShardLocalRuntime,

@@ -153,6 +153,7 @@ impl PipelineEvent {
         timestamp: EventTimestamp,
         kind: EventKind,
     ) -> Self {
+        let status = kind.clone().inferred_status();
         Self {
             event_id,
             source_id,
@@ -168,7 +169,7 @@ impl PipelineEvent {
             correlation_id: None,
             business_key: None,
             timestamp,
-            status: kind.inferred_status(),
+            status,
             kind,
             error: None,
             metadata_refs: Vec::new(),
@@ -306,7 +307,7 @@ impl PipelineEvent {
     }
 
     pub fn kind(&self) -> EventKind {
-        self.kind
+        self.kind.clone()
     }
 
     pub fn error(&self) -> Option<&ErrorInfo> {
@@ -552,7 +553,7 @@ pub(crate) fn encode_pipeline_event(event: &PipelineEvent) -> Vec<u8> {
     put_option_string(&mut out, event.business_key().map(BusinessKey::as_str));
     put_string(&mut out, event.timestamp().as_str());
     out.push(encode_event_status(event.status()));
-    out.push(encode_event_kind(event.kind()));
+    encode_event_kind(&mut out, &event.kind());
     put_option_error(&mut out, event.error());
     put_metadata_refs(&mut out, event.metadata_refs());
     put_option_string(
@@ -588,7 +589,8 @@ pub(crate) fn decode_pipeline_event(
     let business_key = cursor.option_string()?.map(BusinessKey::from);
     let timestamp = EventTimestamp::from(cursor.string()?);
     let status = decode_event_status(cursor.u8()?)?;
-    let kind = decode_event_kind(cursor.u8()?)?;
+    let kind_tag = cursor.u8()?;
+    let kind = decode_event_kind(kind_tag, &mut cursor)?;
     let error = cursor.option_error()?;
     let metadata_refs = cursor.metadata_refs()?;
     let metadata_version = cursor.option_string()?.map(MetadataVersion::from);
@@ -743,20 +745,27 @@ fn decode_event_status(value: u8) -> Result<EventStatus, ProcessEventDecodeError
     }
 }
 
-fn encode_event_kind(value: EventKind) -> u8 {
+fn encode_event_kind(out: &mut Vec<u8>, value: &EventKind) {
     match value {
-        EventKind::ProcessStarted => 0,
-        EventKind::ActivityEntered => 1,
-        EventKind::ActivityCompleted => 2,
-        EventKind::ActivityEscalated => 3,
-        EventKind::ActivityCancelled => 4,
-        EventKind::GatewayTaken => 5,
-        EventKind::ProcessCompleted => 6,
-        EventKind::ProcessFailed => 7,
+        EventKind::ProcessStarted => out.push(0),
+        EventKind::ActivityEntered => out.push(1),
+        EventKind::ActivityCompleted => out.push(2),
+        EventKind::ActivityEscalated => out.push(3),
+        EventKind::ActivityCancelled => out.push(4),
+        EventKind::GatewayTaken => out.push(5),
+        EventKind::ProcessCompleted => out.push(6),
+        EventKind::ProcessFailed => out.push(7),
+        EventKind::Unknown(s) => {
+            out.push(8);
+            put_string(out, s);
+        }
     }
 }
 
-fn decode_event_kind(value: u8) -> Result<EventKind, ProcessEventDecodeError> {
+fn decode_event_kind(
+    value: u8,
+    cursor: &mut PayloadCursor<'_>,
+) -> Result<EventKind, ProcessEventDecodeError> {
     match value {
         0 => Ok(EventKind::ProcessStarted),
         1 => Ok(EventKind::ActivityEntered),
@@ -766,6 +775,7 @@ fn decode_event_kind(value: u8) -> Result<EventKind, ProcessEventDecodeError> {
         5 => Ok(EventKind::GatewayTaken),
         6 => Ok(EventKind::ProcessCompleted),
         7 => Ok(EventKind::ProcessFailed),
+        8 => Ok(EventKind::Unknown(cursor.string()?)),
         _ => Err(ProcessEventDecodeError::InvalidEventKind { value }),
     }
 }
@@ -1026,6 +1036,26 @@ mod tests {
         ));
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn process_event_codec_round_trips_unknown_event_kind() {
+        let event = PipelineEvent::new(
+            EventId::from("event-unknown"),
+            SourceId::from("durga"),
+            SourceSequence(1),
+            TenantId::from("tenant-a"),
+            EnvironmentId::from("prod"),
+            PipelineId::from("pipeline-a"),
+            ProcessDefinitionId::from("definition-a"),
+            ProcessInstanceId::from("instance-a"),
+            EventTimestamp::from("2026-06-30T10:00:00Z"),
+            EventKind::Unknown("CUSTOM_ACTION".to_string()),
+        );
+        let encoded = encode_pipeline_event(&event);
+        let decoded = decode_pipeline_event(&encoded).unwrap();
+        assert_eq!(decoded.event_id(), event.event_id());
+        assert_eq!(decoded.kind(), EventKind::Unknown("CUSTOM_ACTION".to_string()));
     }
 
     fn pipeline_event(event_id: &str, kind: EventKind) -> PipelineEvent {

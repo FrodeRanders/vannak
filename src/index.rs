@@ -386,6 +386,8 @@ mod tests {
             process_version: Some(String::from("v1")),
             business_key: Some(String::from("order-1")),
             timestamp: String::from("2026-06-30T10:00:00Z"),
+            metadata_refs: Vec::new(),
+            schema_version: None,
         };
 
         let event = durga_event.into_pipeline_event(
