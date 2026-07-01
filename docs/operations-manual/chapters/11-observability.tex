@@ -46,6 +46,21 @@ pub struct SegmentBackedMetadataOutboxSnapshot {
 }
 \end{lstlisting}
 
+\subsubsection{BoundedIngestRuntimeSnapshot}
+
+\texttt{BoundedIngestRuntimeSnapshot} pairs the aggregate shard runtime snapshot
+with one \texttt{IngestQueueSnapshot} per logical shard. Each queue snapshot
+reports the \texttt{shard\_id}, current \texttt{depth}, and configured
+\texttt{capacity}; sustained depth near capacity is the local backpressure signal
+for process-event ingest.
+
+\subsubsection{DataProvenanceIndexSnapshot}
+
+\texttt{DataProvenanceIndexSnapshot} reports recent local provenance lookup
+coverage: metadata event count, data-individual count, process-instance count,
+and activity count. It is a hot-index observability surface, not the durable
+Ipto record of truth.
+
 \subsection{Segment Manifest}
 
 A \texttt{SegmentManifest} is itself an observability surface: it reports the

@@ -15,9 +15,12 @@
  * limitations under the License.
  */
 
-use crate::ingest::PipelineEvent;
+use crate::data::{DataIndividualId, DataIndividualMetadataEvent};
+use crate::ingest::{EventTimestamp, PipelineEvent};
 use crate::metadata::MetadataRef;
-use crate::process::{PipelineId, ProcessInstanceId, ProcessInstanceSnapshot};
+use crate::process::{
+    ActivityId, PipelineId, ProcessInstanceId, ProcessInstanceSnapshot, ProcessStatus,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessInstanceQuery {
@@ -39,6 +42,45 @@ pub struct EventQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImpactQuery {
     pub metadata_ref: MetadataRef,
+    pub limit: QueryLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessStatusQuery {
+    pub status: ProcessStatus,
+    pub limit: QueryLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimeRangeQuery {
+    pub start: Option<EventTimestamp>,
+    pub end: Option<EventTimestamp>,
+    pub limit: QueryLimit,
+}
+
+impl TimeRangeQuery {
+    pub fn contains(&self, timestamp: &EventTimestamp) -> bool {
+        self.start.as_ref().is_none_or(|start| timestamp >= start)
+            && self.end.as_ref().is_none_or(|end| timestamp <= end)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataIndividualMetadataQuery {
+    pub data_individual_id: DataIndividualId,
+    pub limit: QueryLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessMetadataQuery {
+    pub process_instance_id: ProcessInstanceId,
+    pub limit: QueryLimit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityMetadataQuery {
+    pub process_instance_id: ProcessInstanceId,
+    pub activity_id: ActivityId,
     pub limit: QueryLimit,
 }
 
@@ -71,4 +113,5 @@ impl Default for QueryLimit {
 pub enum QueryResult {
     ProcessInstances(Vec<ProcessInstanceSnapshot>),
     Events(Vec<PipelineEvent>),
+    MetadataEvents(Vec<DataIndividualMetadataEvent>),
 }

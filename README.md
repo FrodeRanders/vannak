@@ -49,17 +49,41 @@ Examples:
 
 ## Current Status
 
-This repository currently contains the dependency-free Rust core types and
-reducers. It is not yet wired to Durga Kafka topics, Ipto PostgreSQL backends,
-Sitas executors, or Raft.
+This repository currently contains the dependency-free Rust core types,
+reducers, a single-node service orchestration boundary, and optional adapters
+behind feature flags. The standalone Kafka runner can feed Sitas workers; the
+node binary does not yet supervise that runner.
 
 Implemented so far:
 
 - Durga-compatible process event mirror and conversion into Vannak events;
 - process-state reducer for current instance view and activity durations;
 - typed metadata references;
-- single-node hot index for process events and metadata-impact lookup;
+- single-node hot index for process events, status/time-range queries, and
+  metadata-impact lookup;
+- dependency-free shard-local runtime model with deterministic process-instance
+  routing, bounded per-shard ingest queues, owned shard/queue snapshots, and
+  fanout for pipeline, status, time-range, and metadata-impact queries;
+- feature-gated Sitas runtime adapter (`sitas-runtime`) using
+  `ShardedExecutor`, `ShardLocal<HotIndex>`, `ShardMailboxSet<PipelineEvent>`,
+  direct shard submission, mailbox backpressure, explicit shard drains,
+  continuous shard-local mailbox workers, fanout queries, and owned
+  executor/mailbox/hot-index snapshots;
+- feature-gated Kafka-shaped ingest boundary that carries topic, partition, and
+  offset identity, appends process events to the journal when configured, feeds
+  Sitas mailboxes, retains pending records across backpressure retries, and
+  returns the next committable offset;
+- feature-gated `rdkafka` consumer and `vannak-kafka-ingest` runner
+  (`kafka-client`) that subscribes to process-event topics, decodes either
+  Vannak binary process-event payloads or Durga JSON monitor events, feeds
+  Sitas workers, pauses partitions on Sitas mailbox backpressure, resumes them
+  after admission, records Kafka assignment/revocation callbacks, and commits
+  offsets after durable/Sitas admission;
+- opt-in Kafka smoke test (`kafka_integration`) and Redpanda Compose file for
+  verifying the Kafka-to-Sitas path against a live broker;
 - data-individual metadata/provenance event model;
+- local data-individual provenance index for recent metadata lookup by data
+  individual, process instance, and activity;
 - passive and active metadata maps;
 - domain-level `DataIndividualShardId` for Ipto placement, with a deterministic
   hash-derivation helper (`from_data_individual`);
@@ -73,10 +97,19 @@ Implemented so far:
 - in-memory metadata outbox state for pending, acknowledged, failed, and retry
   behavior;
 - append-only segment storage with checksummed records;
+- append-open segment recovery that validates existing records before appending
+  new records after a restart;
 - deterministic Ipto write-payload codec;
 - segment-backed metadata outbox enqueue and replay;
+- segment-backed metadata outbox recovery that rebuilds pending entries after a
+  checkpoint and continues appending to the recovered segment;
 - minimal `IptoWriter` boundary and bounded drain helper for delivering pending
   outbox payloads into a concrete metadata writer;
+- target-aware outbox delivery helpers for writer-lease-controlled drains;
+- `VannakService`, an in-process single-node service boundary that ingests
+  process events, resolves metadata placement, maps metadata events, durably
+  enqueues Ipto write payloads, drains a target only when the caller holds the
+  writer lease, and exposes owned service snapshots;
 - owned metadata outbox snapshots for pending, failed, acknowledged, and segment
   state;
 - segment-offset tracking for acknowledged durable outbox entries, allowing
@@ -188,8 +221,14 @@ metadata event
 The current code includes both an in-memory outbox model and a segment-backed
 outbox wrapper. The durable wrapper appends and syncs the encoded Ipto write
 payload before making it visible as pending in memory, and replay can rebuild
-pending delivery state from the segment. Acknowledgement checkpoints and Ipto
-writer tasks are still future work.
+pending delivery state from the segment. Process events also have a typed
+`ProcessEventJournal` that appends and syncs encoded `PipelineEvent` records,
+replays them into owned events, and can reopen validated segments for append.
+`VannakService` wires this into an opt-in durable process-ingest path and a
+single-node metadata capture path, and can drain a specific Ipto target only
+when the caller holds the target's writer lease. Background writer tasks,
+checkpoint publication, and automatic discovery of owned segments at startup are
+still future work.
 
 ## Crate Layout
 
@@ -200,14 +239,22 @@ src/
   data.rs           data-individual metadata and provenance types
   durga.rs          Durga monitor compatibility types
   index.rs          dependency-free hot index
-  ingest.rs         Vannak process event envelope
+  ingest.rs         Vannak process event envelope and process-event journal
   ipto.rs           Ipto placement, mapping, write payload, and outbox model
+  kafka_ingest.rs   Kafka-shaped Sitas ingest boundary (feature:
+                    sitas-runtime)
+  kafka_client.rs   rdkafka-backed process-event consumer (feature:
+                    kafka-client)
   metadata.rs       typed metadata references
   observability.rs  owned snapshot types
   process.rs        process reducer and current-state view
   query.rs          query request/result types
-  runtime.rs        Sitas integration boundary
-  storage.rs        append-only segment boundary placeholders
+  runtime.rs        dependency-free shard-local runtime, bounded ingest,
+                    and Sitas boundary
+  sitas_runtime.rs  Sitas-backed executor/mailbox adapter (feature:
+                    sitas-runtime)
+  service.rs        single-node ingest/capture/outbox orchestration boundary
+  storage.rs        append-only segment writer/reader and manifests
 ```
 
 More detailed design notes are in [ARCHITECTURE.md](ARCHITECTURE.md).
@@ -249,7 +296,8 @@ Near-term growth order:
 2. Stabilize data-individual identity and provenance metadata events.
 3. Add persistent append-only event/outbox segments.
 4. Add an Ipto writer adapter with idempotent writes.
-5. Add Sitas-backed shard-local execution and query fanout.
+5. Expand the feature-gated Sitas adapter into the service/node runtime path
+   and add background mailbox workers where needed.
 6. Add Raft-backed placement maps, checkpoints, and segment manifests.
 7. Add recovery and ownership-transfer semantics.
 

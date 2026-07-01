@@ -3,8 +3,8 @@
 
 Process monitoring is high-volume and recent-state oriented. Data-individual
 metadata capture has a stronger requirement: it must not be silently lost. This
-section describes the append-only segment substrate and the metadata outbox
-that together provide durable, replayable capture.
+section describes the append-only segment substrate, the process-event journal,
+and the metadata outbox that together provide durable, replayable local capture.
 
 \subsection{Segment Format}
 
@@ -56,6 +56,12 @@ pub fn append_record(&mut self, payload: &[u8]) -> Result<RecordOffset, SegmentE
 \texttt{Ok(None)} at end of file and verifies each record's checksum, returning
 \texttt{SegmentError::ChecksumMismatch} when it differs.
 
+\texttt{SegmentWriter::open\_append} validates an existing segment by scanning
+all records, rejects corrupt or trailing partial records, and reopens the file
+for append while preserving \texttt{record\_count}, \texttt{byte\_len}, and the
+rolling checksum. This is the primitive used by both process-event and metadata
+outbox recovery.
+
 \subsection{SegmentManifest}
 
 A sealed or in-progress segment is described by an owned
@@ -75,6 +81,28 @@ pub struct SegmentManifest {
 \texttt{SegmentWriter::seal} flushes, syncs, and returns the final manifest. The
 manifest is the unit that is later recorded into the cluster control state as a
 sealed segment.
+
+\subsection{ProcessEventJournal}
+
+\texttt{ProcessEventJournal} is the typed local history for accepted
+\texttt{PipelineEvent} values. It uses the segment format above with a compact
+binary payload codec for the process-event envelope, including Durga lifecycle
+kind/status, tenant and environment identity, process instance identity, optional
+activity, correlation, error, metadata references, causal parent, and payload
+fields.
+
+\texttt{ProcessEventJournal::append\_durable} validates the event, appends the
+encoded payload, and syncs the segment before returning the record offset. The
+service-level durable ingest path,
+\texttt{VannakService::ingest\_process\_event\_durable}, performs this journal
+write before reducing the event into the hot index.
+
+\texttt{replay\_process\_event\_segment} reads a segment back into owned
+\texttt{JournaledPipelineEvent} values and reports a
+\texttt{ProcessEventReplaySummary}. \texttt{ProcessEventJournal::recover}
+combines replay with validated append reopening, and
+\texttt{VannakService::recover\_process\_events\_into\_hot\_index} can rebuild a
+single-node hot index from the local process-event segment.
 
 \subsection{MetadataOutbox}
 

@@ -78,7 +78,7 @@ mounted into \filepath{/docker-entrypoint-initdb.d} in order:
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{ll}
+\begin{tabular}{p{0.24\textwidth}p{0.62\textwidth}}
 \hline
 Mounted file & Purpose \\
 \hline
@@ -138,12 +138,14 @@ infrastructure stacks.
 
 \begin{table}[htbp]
 \centering
-\begin{tabular}{ll}
+\begin{tabular}{p{0.24\textwidth}p{0.62\textwidth}}
 \hline
 Invocation & Behavior \\
 \hline
 \shellcmd{./scripts/run-integration-test.sh} & PostgreSQL + \ipto{} writer flow \\
 \shellcmd{./scripts/run-integration-test.sh --cluster} & also start the \raft{} cluster \\
+\shellcmd{./scripts/run-integration-test.sh --kafka} & also start Redpanda and run the Kafka-to-\sitas{} smoke test \\
+\shellcmd{./scripts/run-integration-test.sh --kafka-only} & run only the Kafka-to-\sitas{} smoke test \\
 \shellcmd{./scripts/run-integration-test.sh --no-build} & skip the build step \\
 \shellcmd{./scripts/run-integration-test.sh --down} & tear down all stacks \\
 \hline
@@ -152,9 +154,10 @@ Invocation & Behavior \\
 \end{table}
 
 The script starts PostgreSQL, runs the \texttt{vannak\_integration} test with
-\texttt{VANNAK\_PG\_INTEGRATION=1}, and, when \texttt{--cluster} is given,
-builds the node image, brings up the three nodes, waits for leader election,
-and probes each node.
+\texttt{VANNAK\_PG\_INTEGRATION=1}, optionally starts Redpanda and runs
+\texttt{kafka\_integration} with \texttt{VANNAK\_KAFKA\_INTEGRATION=1}, and,
+when \texttt{--cluster} is given, builds the node image, brings up the three
+nodes, waits for leader election, and probes each node.
 
 \subsection{Verification}
 
@@ -163,6 +166,9 @@ and probes each node.
 \item With PostgreSQL up and \texttt{VANNAK\_PG\_INTEGRATION=1}, the
   \texttt{vannak\_integration} test passes the full ingest, index, outbox, and
   \ipto{} writer flow.
+\item With Redpanda up and \texttt{VANNAK\_KAFKA\_INTEGRATION=1}, the
+  \texttt{kafka\_integration} test produces a Durga JSON process event to Kafka
+  and verifies that the \texttt{kafka-client} consumer feeds \sitas{} workers.
 \item For the cluster, \shellcmd{docker compose -f docker-compose.cluster.yml ps}
   shows four running containers (DNS plus three nodes), and
   \shellcmd{vannak-node probe localhost 10081} returns a cluster summary.
@@ -178,6 +184,8 @@ Feature & Pulled-in dependencies \\
 \hline
 \texttt{ipto-writer} & \texttt{ipto\_rust}, \texttt{serde\_json}, \texttt{uuid} \\
 \texttt{raft} & \texttt{graft-core}, \texttt{serde}, \texttt{serde\_json} \\
+\texttt{sitas-runtime} & local \texttt{sitas} crate \\
+\texttt{kafka-client} & \texttt{sitas-runtime} plus \texttt{rdkafka} \\
 \texttt{node} & \texttt{raft} plus \texttt{graft-runtime}, \texttt{graft-storage}, \texttt{graft-transport}, \texttt{graft-proto}, \texttt{tokio}, \texttt{parking\_lot}, \texttt{bytes} \\
 \hline
 \end{tabular}

@@ -135,7 +135,10 @@ Module & Responsibility \\
 \texttt{cluster} & \raft{}-facing control state and placement \\
 \texttt{raft\_sm} & \graft{} state machine adapter \\
 \texttt{observability} & owned snapshot types \\
-\texttt{runtime} & \sitas{} integration boundary \\
+\texttt{runtime} & dependency-free shard-local runtime, bounded ingest, and
+\sitas{} boundary \\
+\texttt{sitas\_runtime} & \sitas{} executor/mailbox adapter
+(\texttt{sitas-runtime}) \\
 \hline
 \end{tabular}
 \caption{Crate module layout and responsibilities.}
@@ -145,17 +148,31 @@ Module & Responsibility \\
 
 This repository contains the dependency-free Rust core types and reducers plus
 optional adapters behind feature flags. The core is implemented and tested. It
-is not yet wired to live \durga{} Kafka topics or \sitas{} executors; those
-attach at the documented module boundaries.
+includes a standalone Kafka runner that can feed \sitas{} workers, but the node
+binary does not yet supervise that runner; those attach at the documented module
+boundaries.
 
 Implemented today: the \durga{}-compatible process-event mirror, the
 process-state reducer, typed metadata references, the single-node hot index,
-the data-individual provenance model, consistent-hash ring placement with
-range overrides, the \raft{}-replicable placement map with epoch-based query
-fallback, field-to-attribute mapping, the idempotent write payload, the
-in-memory and segment-backed metadata outbox, append-only segment storage, a
-concrete \ipto{} writer (\texttt{IptoRepoWriter}), the PROV-O SDL schema, and a
-\graft{} state machine adapter (\texttt{ClusterStateMachine}).
+typed process, status, time-range, and impact queries, the dependency-free
+shard-local runtime model (\texttt{ShardLocalRuntime}) with bounded ingest
+queues (\texttt{BoundedIngestRuntime}), the feature-gated \sitas{}
+executor/mailbox adapter (\texttt{SitasShardRuntime}), the Kafka-shaped
+topic/partition/offset ingest boundary (\texttt{kafka\_ingest}), the
+feature-gated \texttt{rdkafka} consumer runner (\texttt{vannak-kafka-ingest}),
+the
+data-individual provenance model and local provenance lookup index
+(\texttt{DataProvenanceIndex}), consistent-hash ring placement with range
+overrides, the \raft{}-replicable placement map with epoch-based query fallback,
+field-to-attribute mapping, the idempotent write payload, the in-memory and
+segment-backed metadata outbox, append-only segment storage, the typed
+process-event journal (\texttt{ProcessEventJournal}), a single-node service
+boundary (\texttt{VannakService}) that wires process ingest, durable process
+event journaling, durable metadata capture, target-aware outbox draining,
+writer-lease checks, checkpoint lookup, recovery replay, and owned snapshots, a
+concrete \ipto{} writer
+(\texttt{IptoRepoWriter}), the PROV-O SDL schema, and a \graft{} state machine
+adapter (\texttt{ClusterStateMachine}).
 
 \subsection{Feature Flags}
 

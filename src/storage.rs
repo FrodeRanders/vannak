@@ -109,6 +109,25 @@ impl SegmentWriter {
         })
     }
 
+    pub fn open_append(
+        path: impl AsRef<Path>,
+        segment_id: SegmentId,
+        node_id: NodeId,
+    ) -> Result<Self, SegmentError> {
+        let path = path.as_ref().to_path_buf();
+        let stats = scan_segment(&path)?;
+        let file = OpenOptions::new().append(true).open(&path)?;
+        Ok(Self {
+            segment_id,
+            node_id,
+            path,
+            file,
+            record_count: stats.record_count,
+            byte_len: stats.byte_len,
+            checksum: stats.checksum,
+        })
+    }
+
     pub fn append_record(&mut self, payload: &[u8]) -> Result<RecordOffset, SegmentError> {
         if payload.len() > MAX_RECORD_LEN {
             return Err(SegmentError::RecordTooLarge { len: payload.len() });
@@ -180,10 +199,19 @@ impl SegmentReader {
 
     pub fn read_next(&mut self) -> Result<Option<SegmentRecord>, SegmentError> {
         let mut len_buf = [0u8; 4];
-        match self.reader.read_exact(&mut len_buf) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let mut read = 0usize;
+        while read < len_buf.len() {
+            match self.reader.read(&mut len_buf[read..]) {
+                Ok(0) if read == 0 => return Ok(None),
+                Ok(0) => {
+                    return Err(SegmentError::TrailingBytes {
+                        offset: self.offset,
+                        byte_len: self.offset + read as u64,
+                    });
+                }
+                Ok(n) => read += n,
+                Err(error) => return Err(error.into()),
+            }
         }
 
         let mut checksum_buf = [0u8; 8];
@@ -236,6 +264,10 @@ pub enum SegmentError {
         expected: u64,
         actual: u64,
     },
+    TrailingBytes {
+        offset: u64,
+        byte_len: u64,
+    },
 }
 
 impl fmt::Display for SegmentError {
@@ -254,6 +286,10 @@ impl fmt::Display for SegmentError {
                 f,
                 "segment record checksum mismatch at offset {offset}: expected {expected:#x}, got {actual:#x}"
             ),
+            Self::TrailingBytes { offset, byte_len } => write!(
+                f,
+                "segment has trailing partial record bytes from offset {offset} to byte length {byte_len}"
+            ),
         }
     }
 }
@@ -262,9 +298,10 @@ impl std::error::Error for SegmentError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
-            Self::InvalidMagic | Self::RecordTooLarge { .. } | Self::ChecksumMismatch { .. } => {
-                None
-            }
+            Self::InvalidMagic
+            | Self::RecordTooLarge { .. }
+            | Self::ChecksumMismatch { .. }
+            | Self::TrailingBytes { .. } => None,
         }
     }
 }
@@ -286,6 +323,37 @@ fn checksum(payload: &[u8]) -> u64 {
 
 fn combine_checksum(current: u64, next: u64) -> u64 {
     current.rotate_left(7) ^ next
+}
+
+struct SegmentStats {
+    record_count: u64,
+    byte_len: u64,
+    checksum: u64,
+}
+
+fn scan_segment(path: &Path) -> Result<SegmentStats, SegmentError> {
+    let mut reader = SegmentReader::open(path)?;
+    let mut stats = SegmentStats {
+        record_count: 0,
+        byte_len: SEGMENT_MAGIC.len() as u64,
+        checksum: 0,
+    };
+
+    while let Some(record) = reader.read_next()? {
+        stats.record_count += 1;
+        stats.byte_len = reader.offset;
+        stats.checksum = combine_checksum(stats.checksum, record.checksum);
+    }
+
+    let file_len = std::fs::metadata(path)?.len();
+    if file_len != stats.byte_len {
+        return Err(SegmentError::TrailingBytes {
+            offset: stats.byte_len,
+            byte_len: file_len,
+        });
+    }
+
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -321,12 +389,67 @@ mod tests {
     }
 
     #[test]
+    fn segment_writer_reopens_existing_segment_for_append() {
+        let path = temp_segment_path("append");
+        let mut writer =
+            SegmentWriter::create(&path, SegmentId::from("segment-a"), NodeId::new("node-a"))
+                .unwrap();
+        let first_offset = writer.append_record(b"first").unwrap();
+        writer.sync().unwrap();
+        let first_manifest = writer.manifest();
+        drop(writer);
+
+        let mut writer =
+            SegmentWriter::open_append(&path, SegmentId::from("segment-a"), NodeId::new("node-a"))
+                .unwrap();
+        assert_eq!(writer.manifest(), first_manifest);
+        let second_offset = writer.append_record(b"second").unwrap();
+        assert!(second_offset > first_offset);
+        let final_manifest = writer.seal().unwrap();
+
+        assert_eq!(final_manifest.record_count, 2);
+        let mut reader = SegmentReader::open(&path).unwrap();
+        assert_eq!(reader.read_next().unwrap().unwrap().payload, b"first");
+        assert_eq!(reader.read_next().unwrap().unwrap().payload, b"second");
+        assert!(reader.read_next().unwrap().is_none());
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn segment_rejects_invalid_magic() {
         let path = temp_segment_path("bad-magic");
         fs::write(&path, b"not-a-vannak-segment").unwrap();
 
         let error = SegmentReader::open(&path).unwrap_err();
         assert!(matches!(error, SegmentError::InvalidMagic));
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn segment_rejects_trailing_partial_record() {
+        let path = temp_segment_path("trailing");
+        let mut writer =
+            SegmentWriter::create(&path, SegmentId::from("segment-a"), NodeId::new("node-a"))
+                .unwrap();
+        writer.append_record(b"first").unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(&[1, 2]).unwrap();
+        file.sync_all().unwrap();
+
+        let mut reader = SegmentReader::open(&path).unwrap();
+        assert_eq!(reader.read_next().unwrap().unwrap().payload, b"first");
+        let error = reader.read_next().unwrap_err();
+        assert!(matches!(error, SegmentError::TrailingBytes { .. }));
+
+        let error =
+            SegmentWriter::open_append(&path, SegmentId::from("segment-a"), NodeId::new("node-a"))
+                .unwrap_err();
+        assert!(matches!(error, SegmentError::TrailingBytes { .. }));
 
         fs::remove_file(path).unwrap();
     }

@@ -48,10 +48,18 @@ the offset were already acknowledged and are skipped; records after it are
 re-queued as pending. The returned \texttt{MetadataOutboxReplaySummary} confirms
 how many records were scanned, skipped, and replayed.
 
+\texttt{SegmentBackedMetadataOutbox::recover\_after} combines that replay with
+\texttt{SegmentWriter::open\_append}. Recovery validates the existing segment,
+reconstructs pending outbox entries after the checkpoint, preserves the segment
+manifest counters, and reopens the same segment for subsequent durable appends.
+\texttt{VannakService::recover\_after} wraps this as the single-node service
+recovery constructor.
+
 \begin{vnote}
 Because the durable outbox syncs each payload to its segment before exposing it
 as pending, no acknowledged write can be lost across a crash, and no pending
-write is forgotten: replay rebuilds it from the segment.
+write is forgotten: replay rebuilds it from the segment. A recovered outbox can
+then continue appending new metadata writes to the validated segment.
 \end{vnote}
 
 \subsection{Shard-Range Replay}

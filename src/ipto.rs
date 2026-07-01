@@ -311,6 +311,13 @@ impl MetadataOutbox {
             .find(|entry| entry.status == OutboxStatus::Pending)
     }
 
+    pub fn next_pending_for_target(&self, target: &IptoInstanceId) -> Option<&MetadataOutboxEntry> {
+        self.pending
+            .iter()
+            .filter_map(|key| self.entries.get(key))
+            .find(|entry| entry.status == OutboxStatus::Pending && entry.payload.target == *target)
+    }
+
     pub fn acknowledge(&mut self, key: &IdempotencyKey) -> bool {
         let Some(entry) = self.entries.get_mut(key) else {
             return false;
@@ -503,6 +510,39 @@ pub fn deliver_next_pending(
     }
 }
 
+pub fn deliver_next_pending_for_target(
+    outbox: &mut MetadataOutbox,
+    target: &IptoInstanceId,
+    writer: &mut impl IptoWriter,
+) -> MetadataOutboxDeliveryResult {
+    let Some(payload) = outbox
+        .next_pending_for_target(target)
+        .map(|entry| entry.payload().clone())
+    else {
+        return MetadataOutboxDeliveryResult::NoPending;
+    };
+    let key = payload.idempotency_key.clone();
+
+    match writer.write(&payload) {
+        Ok(()) => {
+            outbox.acknowledge(&key);
+            MetadataOutboxDeliveryResult::Acknowledged {
+                idempotency_key: key,
+            }
+        }
+        Err(error) => {
+            let retryable = error.is_retryable();
+            let message = error.message().to_string();
+            outbox.fail(&key, message.clone());
+            MetadataOutboxDeliveryResult::Failed {
+                idempotency_key: key,
+                retryable,
+                message,
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataOutboxDrainSummary {
     pub attempted: usize,
@@ -550,6 +590,40 @@ pub fn drain_pending_outbox(
     summary
 }
 
+pub fn drain_pending_outbox_for_target(
+    outbox: &mut MetadataOutbox,
+    target: &IptoInstanceId,
+    writer: &mut impl IptoWriter,
+    max_attempts: usize,
+) -> MetadataOutboxDrainSummary {
+    let mut summary = MetadataOutboxDrainSummary {
+        attempted: 0,
+        acknowledged: 0,
+        failed: 0,
+        stopped_after_failure: false,
+    };
+
+    for _ in 0..max_attempts {
+        match deliver_next_pending_for_target(outbox, target, writer) {
+            MetadataOutboxDeliveryResult::NoPending => break,
+            MetadataOutboxDeliveryResult::Acknowledged { .. } => {
+                summary.attempted += 1;
+                summary.acknowledged += 1;
+            }
+            MetadataOutboxDeliveryResult::Failed { retryable, .. } => {
+                summary.attempted += 1;
+                summary.failed += 1;
+                summary.stopped_after_failure = retryable;
+                if retryable {
+                    break;
+                }
+            }
+        }
+    }
+
+    summary
+}
+
 #[derive(Debug)]
 pub struct SegmentBackedMetadataOutbox {
     outbox: MetadataOutbox,
@@ -565,6 +639,24 @@ impl SegmentBackedMetadataOutbox {
         Ok(Self {
             outbox: MetadataOutbox::new(),
             writer: SegmentWriter::create(path, segment_id, node_id)?,
+        })
+    }
+
+    pub fn recover_after(
+        path: impl AsRef<Path>,
+        segment_id: SegmentId,
+        node_id: NodeId,
+        checkpoint_offset: Option<RecordOffset>,
+    ) -> Result<SegmentBackedMetadataOutboxRecovery, MetadataOutboxStorageError> {
+        let path = path.as_ref();
+        let replay = replay_metadata_outbox_segment_after(path, checkpoint_offset)?;
+        let writer = SegmentWriter::open_append(path, segment_id, node_id)?;
+        Ok(SegmentBackedMetadataOutboxRecovery {
+            outbox: Self {
+                outbox: replay.outbox,
+                writer,
+            },
+            summary: replay.summary,
         })
     }
 
@@ -643,6 +735,12 @@ pub enum DurableOutboxEnqueueResult {
 pub struct SegmentBackedMetadataOutboxSnapshot {
     pub outbox: MetadataOutboxSnapshot,
     pub segment: SegmentManifest,
+}
+
+#[derive(Debug)]
+pub struct SegmentBackedMetadataOutboxRecovery {
+    pub outbox: SegmentBackedMetadataOutbox,
+    pub summary: MetadataOutboxReplaySummary,
 }
 
 #[derive(Debug)]
@@ -1130,6 +1228,63 @@ mod tests {
                 replayed_records: 1,
             }
         );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn segment_backed_outbox_recovers_pending_entries_and_appends() {
+        let path = temp_segment_path("recover-outbox");
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.idempotency_key = IdempotencyKey::from("data-2:metadata-event-2");
+
+        let first_offset = {
+            let mut outbox = SegmentBackedMetadataOutbox::create(
+                &path,
+                SegmentId::from("recover-segment"),
+                NodeId::from("node-a"),
+            )
+            .unwrap();
+            let DurableOutboxEnqueueResult::Enqueued {
+                offset: first_offset,
+            } = outbox.enqueue_durable(first.clone()).unwrap()
+            else {
+                unreachable!("first payload should be new")
+            };
+            outbox.enqueue_durable(second.clone()).unwrap();
+            assert!(outbox.outbox_mut().acknowledge(&first.idempotency_key));
+            first_offset
+        };
+
+        let recovery = SegmentBackedMetadataOutbox::recover_after(
+            &path,
+            SegmentId::from("recover-segment"),
+            NodeId::from("node-a"),
+            Some(first_offset),
+        )
+        .unwrap();
+        assert_eq!(
+            recovery.summary,
+            MetadataOutboxReplaySummary {
+                checkpoint_offset: Some(first_offset),
+                scanned_records: 2,
+                skipped_records: 1,
+                replayed_records: 1,
+            }
+        );
+        assert_eq!(recovery.outbox.outbox().snapshot().pending, 1);
+        assert_eq!(recovery.outbox.manifest().record_count, 2);
+
+        let mut recovered = recovery.outbox;
+        let mut third = sample_payload();
+        third.idempotency_key = IdempotencyKey::from("data-3:metadata-event-3");
+        recovered.enqueue_durable(third).unwrap();
+        assert_eq!(recovered.manifest().record_count, 3);
+        recovered.seal().unwrap();
+
+        let replayed = replay_metadata_outbox_segment(&path).unwrap();
+        assert_eq!(replayed.snapshot().total, 3);
 
         fs::remove_file(path).unwrap();
     }

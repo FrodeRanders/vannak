@@ -137,6 +137,29 @@ boundaries (source system, format, size, checksum, received time).
 masking, validation result, enrichment source, field changes). Both are
 insert-builders over \texttt{MetadataFieldName} to \texttt{MetadataValue}.
 
+\subsection{Typed Query APIs}
+
+The local hot index exposes owned query results. Point lookups use
+\texttt{ProcessInstanceQuery}; process-event history for one instance uses
+\texttt{EventQuery}. Broader local queries include \texttt{PipelineQuery},
+\texttt{ImpactQuery}, \texttt{ProcessStatusQuery}, and \texttt{TimeRangeQuery}.
+\texttt{TimeRangeQuery} uses inclusive optional start and end timestamps and is
+backed by a shard-local timestamp index. \texttt{ProcessStatusQuery} filters the
+current owned process snapshots by \texttt{ProcessStatus}.
+
+\texttt{DataProvenanceIndex} indexes captured
+\texttt{DataIndividualMetadataEvent} values by idempotency key,
+\texttt{DataIndividualId}, \texttt{ProcessInstanceId}, and optional
+\texttt{ActivityId}. It answers \texttt{DataIndividualMetadataQuery},
+\texttt{ProcessMetadataQuery}, and \texttt{ActivityMetadataQuery}, and returns
+owned \texttt{QueryResult::MetadataEvents} values. It also exposes the recent
+set of data individuals touched by a process instance or activity.
+
+\texttt{ShardLocalRuntime} fans out pipeline, impact, status, and time-range
+queries across local shards while respecting the global \texttt{QueryLimit}.
+\texttt{VannakService} exposes the same typed query methods plus the local
+provenance queries for the single-node service boundary.
+
 \subsubsection{MetadataOperation}
 
 The operation classifies the provenance event: \texttt{Created},

@@ -15,13 +15,16 @@
  * limitations under the License.
  */
 
-use crate::ingest::{EventId, IngestError, PipelineEvent};
+use crate::ingest::{EventId, EventTimestamp, IngestError, PipelineEvent};
 use crate::metadata::MetadataRef;
 use crate::observability::HotIndexSnapshot;
 use crate::process::{
     PipelineId, ProcessInstanceId, ProcessInstanceSnapshot, ProcessInstanceState,
 };
-use crate::query::{EventQuery, ImpactQuery, PipelineQuery, ProcessInstanceQuery, QueryResult};
+use crate::query::{
+    EventQuery, ImpactQuery, PipelineQuery, ProcessInstanceQuery, ProcessStatusQuery, QueryResult,
+    TimeRangeQuery,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Dependency-free single-node hot index.
@@ -35,6 +38,7 @@ pub struct HotIndex {
     events_by_process: BTreeMap<ProcessInstanceId, Vec<EventId>>,
     events_by_pipeline: BTreeMap<PipelineId, Vec<EventId>>,
     events_by_metadata_ref: BTreeMap<MetadataRef, Vec<EventId>>,
+    events_by_time: BTreeMap<EventTimestamp, Vec<EventId>>,
     duplicate_events: u64,
     rejected_events: u64,
 }
@@ -55,6 +59,7 @@ impl HotIndex {
         let event_id = event.event_id().clone();
         let process_id = event.process_instance_id().clone();
         let pipeline_id = event.pipeline_id().clone();
+        let timestamp = event.timestamp().clone();
         let metadata_refs = event.metadata_refs().to_vec();
 
         self.process_instances
@@ -68,6 +73,10 @@ impl HotIndex {
             .push(event_id.clone());
         self.events_by_pipeline
             .entry(pipeline_id)
+            .or_default()
+            .push(event_id.clone());
+        self.events_by_time
+            .entry(timestamp)
             .or_default()
             .push(event_id.clone());
         for metadata_ref in metadata_refs {
@@ -130,6 +139,36 @@ impl HotIndex {
         QueryResult::Events(events)
     }
 
+    pub fn process_instances_by_status(&self, query: &ProcessStatusQuery) -> QueryResult {
+        let mut instances = Vec::new();
+        for state in self.process_instances.values() {
+            let snapshot = state.snapshot();
+            if snapshot.status == query.status {
+                instances.push(snapshot);
+            }
+            if query.limit.reached(instances.len()) {
+                break;
+            }
+        }
+        QueryResult::ProcessInstances(instances)
+    }
+
+    pub fn events_in_time_range(&self, query: &TimeRangeQuery) -> QueryResult {
+        let mut event_ids = Vec::new();
+        for (timestamp, ids) in &self.events_by_time {
+            if !query.contains(timestamp) {
+                continue;
+            }
+            for event_id in ids {
+                event_ids.push(event_id.clone());
+                if query.limit.reached(event_ids.len()) {
+                    return QueryResult::Events(self.events_for_ids(&event_ids));
+                }
+            }
+        }
+        QueryResult::Events(self.events_for_ids(&event_ids))
+    }
+
     pub fn affected_pipelines(&self, metadata_ref: &MetadataRef) -> Vec<PipelineId> {
         let mut pipelines = BTreeSet::new();
         if let Some(event_ids) = self.events_by_metadata_ref.get(metadata_ref) {
@@ -177,7 +216,7 @@ mod tests {
         ActivityId, EnvironmentId, EventKind, PipelineId, ProcessDefinitionId, ProcessInstanceId,
         ProcessStatus, TenantId,
     };
-    use crate::query::{ImpactQuery, QueryLimit};
+    use crate::query::{ImpactQuery, ProcessStatusQuery, QueryLimit, TimeRangeQuery};
 
     #[test]
     fn ingest_reduces_process_state_and_indexes_metadata() {
@@ -242,6 +281,96 @@ mod tests {
     }
 
     #[test]
+    fn queries_process_instances_by_current_status() {
+        let mut index = HotIndex::new();
+        index
+            .ingest(event_for_instance(
+                "e1",
+                "instance-a",
+                EventKind::ProcessStarted,
+            ))
+            .unwrap();
+        index
+            .ingest(event_for_instance(
+                "e2",
+                "instance-b",
+                EventKind::ProcessStarted,
+            ))
+            .unwrap();
+        index
+            .ingest(event_for_instance(
+                "e3",
+                "instance-b",
+                EventKind::ProcessFailed,
+            ))
+            .unwrap();
+
+        let QueryResult::ProcessInstances(failed) =
+            index.process_instances_by_status(&ProcessStatusQuery {
+                status: ProcessStatus::Failed,
+                limit: QueryLimit::new(10),
+            })
+        else {
+            panic!("status query returns process instances");
+        };
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].process_instance_id,
+            ProcessInstanceId::from("instance-b")
+        );
+
+        let QueryResult::ProcessInstances(active) =
+            index.process_instances_by_status(&ProcessStatusQuery {
+                status: ProcessStatus::Active,
+                limit: QueryLimit::new(1),
+            })
+        else {
+            panic!("status query returns process instances");
+        };
+        assert_eq!(active.len(), 1);
+    }
+
+    #[test]
+    fn queries_events_by_time_range() {
+        let mut index = HotIndex::new();
+        index
+            .ingest(event_at(
+                "e1",
+                "instance-a",
+                "2026-06-30T10:00:00Z",
+                EventKind::ProcessStarted,
+            ))
+            .unwrap();
+        index
+            .ingest(event_at(
+                "e2",
+                "instance-a",
+                "2026-06-30T10:00:02Z",
+                EventKind::ActivityEntered,
+            ))
+            .unwrap();
+        index
+            .ingest(event_at(
+                "e3",
+                "instance-b",
+                "2026-06-30T10:00:03Z",
+                EventKind::ProcessStarted,
+            ))
+            .unwrap();
+
+        let QueryResult::Events(events) = index.events_in_time_range(&TimeRangeQuery {
+            start: Some(EventTimestamp::from("2026-06-30T10:00:01Z")),
+            end: Some(EventTimestamp::from("2026-06-30T10:00:03Z")),
+            limit: QueryLimit::new(1),
+        }) else {
+            panic!("time range query returns events");
+        };
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id(), &EventId::from("e2"));
+    }
+
+    #[test]
     fn durga_process_event_converts_to_pipeline_event() {
         let mut index = HotIndex::new();
         let durga_event = DurgaProcessEvent {
@@ -282,6 +411,28 @@ mod tests {
     }
 
     fn event(event_id: &str, kind: EventKind) -> PipelineEvent {
+        event_for_instance(event_id, "instance-a", kind)
+    }
+
+    fn event_for_instance(event_id: &str, instance_id: &str, kind: EventKind) -> PipelineEvent {
+        event_at(
+            event_id,
+            instance_id,
+            match event_id {
+                "e1" => "2026-06-30T10:00:00Z",
+                "e2" => "2026-06-30T10:00:01Z",
+                _ => "2026-06-30T10:00:02Z",
+            },
+            kind,
+        )
+    }
+
+    fn event_at(
+        event_id: &str,
+        instance_id: &str,
+        timestamp: &str,
+        kind: EventKind,
+    ) -> PipelineEvent {
         PipelineEvent::new(
             EventId::from(event_id),
             SourceId::from("durga-a"),
@@ -290,12 +441,8 @@ mod tests {
             EnvironmentId::from("prod"),
             PipelineId::from("pipeline-a"),
             ProcessDefinitionId::from("definition-a"),
-            ProcessInstanceId::from("instance-a"),
-            EventTimestamp::from(match event_id {
-                "e1" => "2026-06-30T10:00:00Z",
-                "e2" => "2026-06-30T10:00:01Z",
-                _ => "2026-06-30T10:00:02Z",
-            }),
+            ProcessInstanceId::from(instance_id),
+            EventTimestamp::from(timestamp),
             kind,
         )
     }

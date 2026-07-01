@@ -39,16 +39,24 @@ graft-proto = { path = "../raft/graft-rust/graft-proto", optional = true }
 prost = { version = "0.14", optional = true }
 bytes = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+sitas = { path = "../sitas", optional = true }
+rdkafka = { version = "0.36", optional = true }
 
 [features]
 default = []
 ipto-writer = ["dep:ipto_rust", "dep:serde_json", "dep:uuid"]
 raft = ["dep:graft-core", "dep:serde", "dep:serde_json"]
 node = ["raft", "dep:graft-runtime", "dep:graft-storage", "dep:graft-transport", "dep:tokio", "dep:parking_lot", "dep:graft-proto", "dep:prost", "dep:bytes", "dep:tracing-subscriber"]
+sitas-runtime = ["dep:sitas"]
+kafka-client = ["sitas-runtime", "dep:rdkafka", "dep:serde", "dep:serde_json"]
 
 [[test]]
 name = "vannak_integration"
 required-features = ["ipto-writer"]
+
+[[test]]
+name = "kafka_integration"
+required-features = ["kafka-client"]
 
 [[bin]]
 name = "vannak-node"
@@ -57,3 +65,7 @@ required-features = ["node"]
 [[bin]]
 name = "vannak-load"
 required-features = []
+
+[[bin]]
+name = "vannak-kafka-ingest"
+required-features = ["kafka-client"]

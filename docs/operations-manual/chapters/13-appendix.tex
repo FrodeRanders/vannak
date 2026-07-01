@@ -5,6 +5,216 @@ This appendix collects reference material: the command-line interface,
 environment variables, infrastructure files, the wire and storage formats, the
 repository layout, and a glossary.
 
+\subsection{Functionality Status Matrix}
+
+This matrix cross-references the operating model described in this manual with
+the functionality currently present in the repository.
+
+\begin{description}
+\item[Implemented] compiled and exercised by unit tests or the normal build.
+\item[Implemented primitive] the core type or helper exists, but no daemon or
+  orchestration loop wires it into an end-to-end service path.
+\item[Implemented service boundary] wired through the in-process
+  \texttt{VannakService}; still not an external daemon or \sitas{} runtime.
+\item[Feature-gated] compiled only with the named Cargo feature.
+\item[Test/runbook] available through tests, examples, scripts, or operator
+  commands rather than as a continuously running service.
+\item[Planned] documented design direction; not implemented in this repository
+  yet.
+\end{description}
+
+\begin{longtable}{p{0.24\textwidth}p{0.20\textwidth}p{0.48\textwidth}}
+\hline
+Capability & Status & Code or manual reference \\
+\hline
+\endfirsthead
+\hline
+Capability & Status & Code or manual reference \\
+\hline
+\endhead
+\hline
+\endfoot
+Durga-compatible process-event mirror & Implemented &
+\texttt{durga.rs}, \texttt{ingest.rs}, and \texttt{HotIndex::ingest}; tested
+through the Durga conversion test. \\
+
+Live Durga Kafka ingestion & Feature-gated &
+\texttt{kafka\_ingest.rs} defines decoded Kafka process-event records with
+topic, partition, and offset identity, journals them when configured, feeds the
+\sitas{} mailbox path, retains pending records across backpressure retries, and
+returns the next committable offset.
+\texttt{kafka\_client.rs} and \texttt{vannak-kafka-ingest} are compiled with
+\texttt{kafka-client}; they use \texttt{rdkafka}, subscribe to process-event
+topics, decode either Vannak binary process-event payloads or Durga JSON monitor
+events, feed Sitas workers, pause Kafka partitions when Sitas mailboxes are
+full, resume them after admission, record assignment/revocation callbacks in
+owned snapshots, and commit offsets after admission. If a partition is revoked
+while it still has an uncommitted pending record, the consumer returns an
+explicit error instead of committing the offset. Live Durga schema verification,
+richer operational supervision, and live Durga compatibility coverage remain
+planned.
+\\
+
+Kafka broker smoke test & Test/runbook &
+\texttt{docker-compose.kafka.yml} starts a single Redpanda broker.
+\texttt{tests/kafka\_integration.rs} is enabled with
+\texttt{VANNAK\_KAFKA\_INTEGRATION=1}; it produces a Durga JSON process event,
+consumes it through \texttt{KafkaProcessConsumer}, and verifies that \sitas{}
+workers reduce the event into the hot index. \\
+
+Process-state reduction & Implemented &
+\texttt{ProcessInstanceState::apply} and \texttt{HotIndex}; maintains current
+status, activity states, durations, metadata references, and owned snapshots. \\
+
+Single-node hot index & Implemented &
+\texttt{HotIndex} indexes events by id, process instance, pipeline, and
+metadata reference. It is intentionally non-concurrent shard-local state. \\
+
+Single-node service orchestration & Implemented service boundary &
+\texttt{VannakService} wires \texttt{HotIndex}, \texttt{IptoPlacementMap},
+\texttt{IptoMapping}, and \texttt{SegmentBackedMetadataOutbox} for process
+ingest, durable metadata capture, lease-gated target drains, checkpoint lookup,
+and owned snapshots. \\
+
+Shard-local runtime model & Implemented &
+\texttt{ShardLocalRuntime} owns one \texttt{HotIndex} per
+\texttt{LogicalShardId}, routes process-instance-owned events and queries to
+one shard, fans out pipeline and impact queries, and returns owned aggregate
+snapshots. \\
+
+Bounded local ingest queues & Implemented &
+\texttt{BoundedIngestRuntime} adds bounded per-shard process-event queues,
+explicit \texttt{RuntimeError::QueueFull} backpressure, shard drain summaries,
+and owned queue-depth snapshots. \\
+
+\sitas{} executor integration & Feature-gated &
+\texttt{SitasShardRuntime} is compiled with \texttt{sitas-runtime}. It starts a
+\sitas{} \texttt{ShardedExecutor}, stores one \texttt{HotIndex} in
+\texttt{ShardLocal} state per shard, routes direct process-event ingest through
+executor submissions, and exposes owned executor/hot-index snapshots. \\
+
+\sitas{} process-event mailboxes & Feature-gated &
+\texttt{SitasShardRuntime} creates a bounded
+\texttt{ShardMailboxSet<PipelineEvent>}; \texttt{try\_submit} returns explicit
+backpressure on full mailboxes, \texttt{submit} waits for capacity, manual
+\texttt{drain\_shard}/\texttt{drain\_all} remains available, and
+\texttt{start\_mailbox\_workers} starts one continuous receiver per Sitas shard
+to feed the owning shard-local \texttt{HotIndex}. \\
+
+Typed query primitives & Implemented &
+\texttt{query.rs} plus \texttt{HotIndex::process\_instance},
+\texttt{pipeline\_instances}, \texttt{events}, \texttt{impact},
+\texttt{process\_instances\_by\_status}, and
+\texttt{events\_in\_time\_range}. Data-individual metadata queries are exposed
+through \texttt{DataIndividualMetadataQuery}, \texttt{ProcessMetadataQuery}, and
+\texttt{ActivityMetadataQuery}. \\
+
+Local query fanout & Implemented &
+\texttt{ShardLocalRuntime::pipeline\_instances} and
+\texttt{ShardLocalRuntime::impact}, plus status and time-range query methods,
+scatter across local shards and merge owned results with global limits.
+Cross-node cluster query fanout is still planned. \\
+
+Data-individual provenance model & Implemented &
+\texttt{DataIndividualMetadataEvent}, \texttt{PassiveMetadata},
+\texttt{ActiveMetadata}, \texttt{MetadataOperation}, and deterministic
+\texttt{IdempotencyKey} derivation. \\
+
+Local provenance lookup index & Implemented &
+\texttt{DataProvenanceIndex} idempotently indexes captured metadata events by
+data individual, process instance, and optional activity. \texttt{VannakService}
+updates it after durable metadata enqueue and exposes owned local query results.
+\\
+
+Domain metadata placement key & Implemented &
+\texttt{DataIndividualShardId::from\_data\_individual}; explicitly separate
+from \sitas{} executor placement. \\
+
+Ipto placement ring and overrides & Implemented &
+\texttt{IptoPlacementRing}, \texttt{IptoPlacementRange}, and
+\texttt{IptoPlacementMap}; epoch validation and five-epoch fallback history
+live in \texttt{ClusterControlState}. \\
+
+Ipto field mapping and payload codec & Implemented &
+\texttt{IptoMapping}, \texttt{IptoWritePayload::from\_event},
+\texttt{encode}, and \texttt{decode}. Only mapped fields are written. \\
+
+In-memory metadata outbox & Implemented &
+\texttt{MetadataOutbox} supports duplicate detection, pending delivery,
+acknowledgement, failure state, retry, and snapshots. \\
+
+Segment-backed metadata outbox & Implemented service boundary &
+\texttt{SegmentBackedMetadataOutbox::enqueue\_durable} appends and syncs before
+exposing a payload as pending. \texttt{VannakService::capture\_metadata\_event}
+wires placement, mapping, and durable enqueue into one local capture path. \\
+
+Append-only segment format & Implemented &
+\texttt{SegmentWriter}, \texttt{SegmentReader}, \texttt{SegmentManifest}, magic
+validation, record checksums, and seal/manifest support. \\
+
+Raw process-event segment history & Implemented service boundary &
+\texttt{ProcessEventJournal::append\_durable} validates, appends, and syncs
+encoded \texttt{PipelineEvent} records. \texttt{replay\_process\_event\_segment}
+returns owned \texttt{JournaledPipelineEvent} values, and
+\texttt{VannakService::ingest\_process\_event\_durable} journals before local
+hot-index reduction. \texttt{vannak-kafka-ingest} can use the same journal
+before committing Kafka offsets. \\
+
+Outbox replay after checkpoint & Implemented service boundary &
+\texttt{replay\_metadata\_outbox\_segment\_after} rebuilds pending state after
+a checkpoint offset and returns \texttt{MetadataOutboxReplaySummary};
+\texttt{VannakService::replay\_metadata\_outbox\_after} exposes the same local
+recovery helper. \\
+
+Shard-range rebalance replay & Implemented primitive &
+\texttt{replay\_metadata\_outbox\_segment\_for\_shard\_range} and
+\texttt{rebalance\_shard\_range\_to} exist and are tested. Automatic
+placement-change orchestration is planned. \\
+
+Ipto writer adapter & Feature-gated &
+\texttt{IptoRepoWriter} is compiled with \texttt{ipto-writer}; it configures
+the built-in PROV-O SDL and writes units through \texttt{ipto\_rust}. \\
+
+PostgreSQL-backed Ipto integration test & Test/runbook &
+\texttt{tests/vannak\_integration.rs} runs only when
+\texttt{VANNAK\_PG\_INTEGRATION=1}; otherwise it returns early. \\
+
+Raft-replicable control state & Implemented &
+\texttt{ClusterControlState} applies node, placement, lease, sealed-segment,
+outbox-checkpoint, and checkpoint-manifest commands. \\
+
+Raft state-machine adapter & Feature-gated &
+\texttt{ClusterStateMachine} is compiled with \texttt{raft}; commands,
+snapshots, restore, and seven read queries are JSON encoded. \\
+
+\texttt{vannak-node} control-plane binary & Feature-gated &
+Compiled with \texttt{node}; hosts a \graft{} node over TCP with DNS SRV
+discovery and file-backed \raft{} storage. It does not ingest data events. \\
+
+Target-aware writer lease enforcement & Implemented service boundary &
+\texttt{WriterLease} is stored and epoch-validated in control state.
+\texttt{VannakService::drain\_metadata\_for\_target\_if\_lease\_held} checks the
+lease holder before draining only that target. Background lease renewal and
+writer task scheduling remain future work. \\
+
+Local metadata outbox crash recovery & Implemented service boundary &
+\texttt{SegmentBackedMetadataOutbox::recover\_after} replays records after a
+checkpoint and reopens the validated segment for append.
+\texttt{VannakService::recover\_after} rebuilds the single-node service around
+that recovered outbox. Automatic discovery of owned segments and background
+delivery resumption at daemon startup remain future work. \\
+
+Owned observability snapshots & Implemented primitive &
+\texttt{HotIndexSnapshot}, \texttt{MetadataOutboxSnapshot},
+\texttt{SegmentBackedMetadataOutboxSnapshot}, replay summaries, and rebalance
+summaries are owned values. No metrics or HTTP health endpoint exists. \\
+
+Load generator & Test/runbook &
+\texttt{vannak-load} simulates process and metadata events in-process; with
+\texttt{ipto-writer} it can write through \ipto{}, but it is not the production
+service loop. \\
+\end{longtable}
+
 \subsection{CLI Reference}
 
 The \texttt{vannak-node} binary (built with the \texttt{node} feature) accepts
@@ -42,6 +252,9 @@ Variable & Meaning \\
 \texttt{IPTO\_PG\_DATABASE} & \ipto{} PostgreSQL database (default \texttt{repo}) \\
 \texttt{VANNAK\_PG\_INTEGRATION} & set to \texttt{1} to enable the integration test \\
 \texttt{VANNAK\_PG\_PORT} & host port mapping for the test PostgreSQL \\
+\texttt{VANNAK\_KAFKA\_INTEGRATION} & set to \texttt{1} to enable the Kafka smoke test \\
+\texttt{VANNAK\_KAFKA\_BROKERS} & Kafka broker list for the smoke test (default \texttt{localhost:19092}) \\
+\texttt{VANNAK\_KAFKA\_PORT} & host port mapping for the Redpanda Kafka API \\
 \texttt{POSTGRES\_USER} & test PostgreSQL role (\texttt{repo}) \\
 \texttt{POSTGRES\_PASSWORD} & test PostgreSQL password (\texttt{repo}) \\
 \texttt{POSTGRES\_DB} & test PostgreSQL database (\texttt{repo}) \\
@@ -56,6 +269,9 @@ Variable & Meaning \\
 \item[\filepath{docker-compose.test.yml}] PostgreSQL 16 with the \ipto{} schema,
   procedures, and boot data mounted into \filepath{/docker-entrypoint-initdb.d};
   used by the integration test.
+\item[\filepath{docker-compose.kafka.yml}] Redpanda broker exposing a
+  Kafka-compatible API on \texttt{localhost:19092}; used by
+  \texttt{tests/kafka\_integration.rs}.
 \item[\filepath{docker-compose.cluster.yml}] CoreDNS plus three
   \texttt{vannak-node} containers on the \texttt{10.77.0.0/24} network, each
   listening on port 10081 with DNS SRV discovery.
@@ -169,6 +385,9 @@ type ProvEntity @template(name: "ProvEntity") {
 \item Or run everything via
   \shellcmd{./scripts/run-integration-test.sh} (add \shellcmd{--cluster} for the
   \raft{} cluster).
+\item Run the Kafka smoke test with
+  \shellcmd{./scripts/run-integration-test.sh --kafka-only}, or add
+  \shellcmd{--kafka} to the full integration run.
 \end{enumerate}
 
 The test exercises the full ingest, index, outbox, and \ipto{} writer flow plus
@@ -232,7 +451,7 @@ segment checksum combines records with a rotate-and-xor step.
 
 \begin{lstlisting}[numbers=none]
 src/
-  ingest.rs         process event envelope and validation
+  ingest.rs         process event envelope, validation, and journal
   process.rs        process model and state reducer
   data.rs           data-individual provenance model
   metadata.rs       typed metadata references
@@ -245,7 +464,8 @@ src/
   cluster.rs        Raft-facing control state and placement
   raft_sm.rs        graft state machine adapter (feature: raft)
   observability.rs  owned snapshot types
-  runtime.rs        Sitas integration boundary
+  runtime.rs        shard-local runtime, bounded ingest, and Sitas boundary
+  sitas_runtime.rs  Sitas executor/mailbox adapter (feature: sitas-runtime)
   bin/vannak-node.rs  Raft node binary (feature: node)
 docs/
   ARCHITECTURE.md   detailed architecture notes

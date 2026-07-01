@@ -4,7 +4,8 @@
 #
 # Starts infrastructure and runs integration tests. By default, runs the
 # PostgreSQL/Ipto ingest→index→outbox→writer flow. With --cluster, also
-# starts a 3-node vannak-node Raft cluster.
+# starts a 3-node vannak-node Raft cluster. With --kafka, also starts a
+# Kafka-compatible Redpanda broker and runs the Kafka→Sitas smoke test.
 #
 # The cluster uses explicit container-name peers (vannak-N@vannak-N:10081)
 # resolved via Docker's built-in DNS. DNS SRV discovery (--srv flag) is
@@ -15,6 +16,8 @@
 # Usage:
 #   ./scripts/run-integration-test.sh               # PostgreSQL + Ipto writer
 #   ./scripts/run-integration-test.sh --cluster     # PostgreSQL + Raft cluster
+#   ./scripts/run-integration-test.sh --kafka       # also run Kafka smoke test
+#   ./scripts/run-integration-test.sh --kafka-only  # Kafka smoke test only
 #   ./scripts/run-integration-test.sh --no-build
 #   ./scripts/run-integration-test.sh --down
 # ---------------------------------------------------------------------------
@@ -24,17 +27,23 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PG_COMPOSE="$PROJECT_DIR/docker-compose.test.yml"
 CLUSTER_COMPOSE="$PROJECT_DIR/docker-compose.cluster.yml"
+KAFKA_COMPOSE="$PROJECT_DIR/docker-compose.kafka.yml"
 export VANNAK_PG_PORT="${VANNAK_PG_PORT:-5432}"
+export VANNAK_KAFKA_PORT="${VANNAK_KAFKA_PORT:-19092}"
 
 NO_BUILD=false
 DOWN_ONLY=false
 RUN_CLUSTER=false
+RUN_KAFKA=false
+KAFKA_ONLY=false
 
 for arg in "$@"; do
     case "$arg" in
         --no-build) NO_BUILD=true ;;
         --down) DOWN_ONLY=true ;;
         --cluster) RUN_CLUSTER=true ;;
+        --kafka) RUN_KAFKA=true ;;
+        --kafka-only) RUN_KAFKA=true; KAFKA_ONLY=true ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -48,6 +57,9 @@ compose_down() {
     if [ "$RUN_CLUSTER" = true ]; then
         docker compose -f "$CLUSTER_COMPOSE" down -v --remove-orphans 2>/dev/null || true
     fi
+    if [ "$RUN_KAFKA" = true ]; then
+        docker compose -f "$KAFKA_COMPOSE" down -v --remove-orphans 2>/dev/null || true
+    fi
 }
 
 if [ "$DOWN_ONLY" = true ]; then
@@ -60,6 +72,7 @@ trap compose_down EXIT
 # ---------------------------------------------------------------------------
 # PostgreSQL + Ipto writer integration test
 # ---------------------------------------------------------------------------
+if [ "$KAFKA_ONLY" = false ]; then
 echo "==> Starting PostgreSQL (port $VANNAK_PG_PORT)..."
 docker compose -f "$PG_COMPOSE" down -v 2>/dev/null || true
 
@@ -89,11 +102,12 @@ cargo test --features ipto-writer --test vannak_integration -- --test-threads=1 
 
 echo ""
 echo "==> Ipto writer test complete."
+fi
 
 # ---------------------------------------------------------------------------
 # Load test with Ipto writer (smoke test)
 # ---------------------------------------------------------------------------
-if [ "${SKIP_LOAD:-false}" != true ]; then
+if [ "$KAFKA_ONLY" = false ] && [ "${SKIP_LOAD:-false}" != true ]; then
     if [ "$NO_BUILD" = false ]; then
         echo "==> Building vannak-load with ipto-writer feature..."
         cargo build --features ipto-writer --bin vannak-load --release 2>&1 | tail -1
@@ -106,9 +120,35 @@ if [ "${SKIP_LOAD:-false}" != true ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Kafka -> Sitas integration test
+# ---------------------------------------------------------------------------
+if [ "$RUN_KAFKA" = true ]; then
+    echo ""
+    echo "==> Starting Redpanda Kafka broker (port $VANNAK_KAFKA_PORT)..."
+    docker compose -f "$KAFKA_COMPOSE" down -v 2>/dev/null || true
+    if ! docker compose -f "$KAFKA_COMPOSE" up -d --wait redpanda; then
+        echo "ERROR: Redpanda container failed to start. Logs:"
+        docker compose -f "$KAFKA_COMPOSE" logs redpanda 2>/dev/null || true
+        exit 1
+    fi
+
+    if [ "$NO_BUILD" = false ]; then
+        echo "==> Building Kafka integration test..."
+        cargo test --features kafka-client --test kafka_integration --no-run 2>&1 | tail -1
+    fi
+
+    echo "==> Running Kafka -> Sitas integration test..."
+    export VANNAK_KAFKA_INTEGRATION=1
+    export VANNAK_KAFKA_BROKERS="localhost:$VANNAK_KAFKA_PORT"
+    cargo test --features kafka-client --test kafka_integration -- --test-threads=1 --nocapture 2>&1
+    echo ""
+    echo "==> Kafka smoke test complete."
+fi
+
+# ---------------------------------------------------------------------------
 # Raft cluster integration test
 # ---------------------------------------------------------------------------
-if [ "$RUN_CLUSTER" = true ]; then
+if [ "$KAFKA_ONLY" = false ] && [ "$RUN_CLUSTER" = true ]; then
     echo ""
     echo "==> Building vannak-node Docker image..."
     docker compose -f "$CLUSTER_COMPOSE" build --no-cache vannak-1 2>&1 | tail -3

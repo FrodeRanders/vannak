@@ -481,6 +481,8 @@ Initial query families:
 - get process instance state;
 - list active or failed process instances by pipeline;
 - find events for process instance;
+- find process instances by current process status;
+- find events in a timestamp range;
 - find events by metadata object;
 - find datasets affected by pipeline failure;
 - find pipelines touching a dataset or classification;
@@ -492,6 +494,15 @@ Initial query families:
 
 Point queries should route to one shard when possible. Broader queries should
 fan out, collect bounded partial results, and merge deterministically.
+The local implementation currently exposes these families through
+`ProcessInstanceQuery`, `PipelineQuery`, `EventQuery`, `ImpactQuery`,
+`ProcessStatusQuery`, `TimeRangeQuery`, `DataIndividualMetadataQuery`,
+`ProcessMetadataQuery`, and `ActivityMetadataQuery`. `HotIndex` owns the
+shard-local process-event indexes; `DataProvenanceIndex` owns the recent
+data-individual metadata indexes by data individual, process instance, and
+activity. `ShardLocalRuntime` scatters broad process-event query families across
+local shards with a global result limit; `VannakService` exposes pass-through
+methods for the single-node service boundary.
 
 Scatter/gather queries need explicit limits:
 
@@ -558,8 +569,15 @@ Outbox entries should include:
 Idempotency is required because replay after failure may resend the same
 metadata event to Ipto.
 
-The current Rust foundation includes a segment-backed metadata outbox boundary:
+The current Rust foundation includes segment-backed process-event and metadata
+outbox boundaries:
 
+- `ProcessEventJournal` appends and syncs encoded `PipelineEvent` records,
+  replays them as owned `JournaledPipelineEvent` values, and reopens validated
+  segments for append through `ProcessEventJournal::recover`;
+- `VannakService::ingest_process_event_durable` journals a process event before
+  reducing it into `HotIndex`, while `recover_process_events_into_hot_index`
+  rebuilds local hot state from a process-event segment;
 - `IptoWritePayload` has a deterministic dependency-free binary codec;
 - `SegmentBackedMetadataOutbox` appends and syncs the encoded payload to a
   local segment before inserting it into the pending in-memory outbox;
@@ -567,15 +585,30 @@ The current Rust foundation includes a segment-backed metadata outbox boundary:
   payload records from a segment;
 - `replay_metadata_outbox_segment_after` rebuilds only entries after a committed
   checkpoint offset and returns an owned `MetadataOutboxReplaySummary`;
+- `SegmentWriter::open_append` validates an existing segment before reopening
+  it, preserving record count, byte length, and rolling checksum for continued
+  appends after restart;
+- `SegmentBackedMetadataOutbox::recover_after` combines checkpoint-aware replay
+  with append-open segment recovery so pending outbox state can be rebuilt and
+  new metadata writes can continue in the same segment;
 - `MetadataOutboxSnapshot` and `SegmentBackedMetadataOutboxSnapshot` expose
   owned observability state without borrowing outbox internals;
 - acknowledged segment-backed entries retain record offsets and can produce
-  `MetadataOutboxCheckpoint` data for the Raft control plane.
+  `MetadataOutboxCheckpoint` data for the Raft control plane;
+- `drain_pending_outbox_for_target` and `deliver_next_pending_for_target`
+  deliver only entries for a selected Ipto target, which lets a caller enforce
+  target-level writer leases;
+- `VannakService` combines a `HotIndex`, an `IptoPlacementMap`, an
+  `IptoMapping`, a `SegmentBackedMetadataOutbox`, and an optional
+  `ProcessEventJournal` into a single-node orchestration boundary for process
+  ingest, durable metadata capture, lease-gated target drains, checkpoint
+  lookup, recovery replay, and owned service snapshots.
 
-This is intentionally only the local persistence, replay, and checkpoint-data
-boundary. Retry backoff, writer leases, and checkpoint publication remain
-separate concerns so they can be attached to Raft-controlled ownership without
-changing code that produces metadata write payloads.
+This is intentionally only the local persistence, replay, append recovery, and
+checkpoint-data boundary. Retry backoff, automatic writer task scheduling,
+checkpoint publication, and discovery of owned segments at process startup
+remain separate concerns so they can be attached to Raft-controlled ownership
+without changing code that produces process events or metadata write payloads.
 
 ## 9. Raft-Controlled State
 
@@ -637,7 +670,12 @@ Bad Raft payloads:
 - high-frequency metrics.
 
 Those high-volume records should flow through Sitas-owned hot state,
-append-only segments, outbox replay, and Ipto writers. Raft should commit the
+append-only segments, journal replay, outbox replay, and Ipto writers. The
+current dependency-free implementation includes `ProcessEventJournal`, which
+encodes validated `PipelineEvent` values into local segments, syncs them before
+durable acknowledgement, replays them as owned events, and reopens validated
+segments for append. `VannakService::ingest_process_event_durable` uses that
+journal before reducing the event into the hot index. Raft should commit the
 metadata that makes those paths recoverable and unambiguous.
 
 The first useful Raft-backed feature should be:
@@ -717,12 +755,14 @@ Responsibilities:
 The current code exposes the first writer boundary as `IptoWriter`. It is a
 synchronous trait over an owned `IptoWritePayload`, with retryable/permanent
 write errors and `deliver_next_pending` to move one pending outbox entry to
-acknowledged or failed. `drain_pending_outbox` adds a bounded delivery loop that
-can later become the inner unit of a Sitas shard-local writer task. A real
+acknowledged or failed. `drain_pending_outbox` adds a bounded delivery loop, and
+`drain_pending_outbox_for_target` restricts delivery to one Ipto target for
+writer-lease-controlled drains. `VannakService` uses the target-aware helper
+after checking `ClusterControlState` for a matching `WriterLease`. A real
 adapter should implement this trait against the Rust Ipto port or direct
-PostgreSQL repositories. Async execution, batching, backoff, and target-specific
-writer tasks should be layered outside this trait so the domain outbox remains
-independent of the runtime.
+PostgreSQL repositories. Async execution, batching, backoff, and background
+target-specific writer tasks should be layered outside this trait so the domain
+outbox remains independent of the runtime.
 
 Events should record the metadata version used for enrichment when possible.
 This makes later analysis reproducible:
@@ -795,6 +835,54 @@ what happened to a specific data item.
 
 Sitas is the hot-state runtime.
 
+The crate now has two runtime layers. The dependency-free runtime models define
+the local contract and remain the default build: `ShardLocalRuntime` keeps one
+`HotIndex` per logical shard, routes by `ProcessInstanceId`, sends
+process-owned queries to the owning shard, fans out pipeline and metadata-impact
+queries, and returns owned aggregate snapshots. `BoundedIngestRuntime` adds the
+submit/drain split for bounded per-shard process-event queues, explicit
+backpressure through `RuntimeError::QueueFull`, drain summaries, and queue-depth
+snapshots.
+
+With the `sitas-runtime` feature, `SitasShardRuntime` wires that contract to the
+local Sitas project. It starts a Sitas `ShardedExecutor`, stores
+`HotIndex` and a per-shard `ShardReceiver<PipelineEvent>` inside
+`ShardLocal<SitasShardState>`, and creates a bounded
+`ShardMailboxSet<PipelineEvent>` for owned process-event transfer. Direct
+ingest submits work to the owning executor shard and waits for the shard-local
+reducer. Bounded ingest uses `try_submit` for mailbox backpressure and explicit
+`drain_shard`/`drain_all` calls to move queued events into the owning hot index.
+For the normal hot path, `start_mailbox_workers` starts one long-running Sitas
+worker per shard. Each worker owns its shard mailbox receiver, awaits owned
+`PipelineEvent` messages, and re-enters shard-local state only for the
+synchronous `HotIndex` mutation. Queries either route to one owning shard or fan
+out across Sitas shards and return owned results. Snapshots include the Sitas
+executor snapshot, converted mailbox snapshots, and Vannak hot-index totals.
+
+The `kafka_ingest` module is the Kafka-facing correctness boundary. It defines
+decoded Kafka records with topic, partition, and offset identity.
+`submit_kafka_process_record` optionally appends the process event to
+`ProcessEventJournal`, submits it to the backpressure-aware Sitas mailbox path,
+and returns the next offset a concrete consumer may commit.
+`KafkaPendingRecord` and `try_submit_kafka_pending_record` provide the
+nonblocking variant: a full Sitas mailbox leaves the record pending and
+uncommitted while preserving any journal offset already written. With the
+`kafka-client` feature, `kafka_client` and `vannak-kafka-ingest` provide an
+`rdkafka` consumer loop: subscribe to process-event topics, poll records, decode
+Vannak binary process-event payloads or Durga JSON monitor events, submit them
+to Sitas workers, pause partitions when Sitas applies mailbox backpressure,
+resume them after admission, and commit offsets after durable/Sitas admission
+succeeds. The consumer also installs `rdkafka` rebalance callbacks, records
+assignment/revocation/error counts in an owned `KafkaProcessConsumerSnapshot`,
+and refuses to continue if Kafka revokes a partition while Vannak still holds an
+uncommitted pending record from that partition. The Durga JSON adapter maps
+common monitor fields into `DurgaProcessEvent` before conversion into
+`PipelineEvent`; live Durga schema compatibility still needs to be verified
+against a real Durga deployment. Remaining runtime work includes richer
+operational supervision and live Durga compatibility coverage. Live broker
+smoke coverage exists through `docker-compose.kafka.yml` and the opt-in
+`kafka_integration` test.
+
 Useful Sitas mechanisms:
 
 - `ShardedExecutor` for shard-per-thread async execution;
@@ -803,7 +891,8 @@ Useful Sitas mechanisms:
 - `ShardedSubmitter` for explicit cross-shard work;
 - owned snapshots for observability;
 - CPU placement and future NUMA memory placement for hot indexes;
-- bounded queues and backpressure for ingest control.
+- bounded queues and backpressure for ingest control. [done locally through
+  `BoundedIngestRuntime` and feature-gated through `SitasShardRuntime`]
 
 For Ipto persistence, useful Sitas shapes are:
 
@@ -872,7 +961,11 @@ These policies should be typed configuration, not scattered conditionals.
 
 - Define typed event model.
 - Define metadata reference model.
-- Build single-node Sitas ingest service.
+- Build single-node Sitas ingest service. [partly done: dependency-free
+  `ShardLocalRuntime` and `BoundedIngestRuntime` plus feature-gated
+  `SitasShardRuntime` with actual Sitas executor submission, shard-local hot
+  indexes, bounded process-event mailboxes, explicit drains, fanout queries,
+  backpressure, and owned snapshots; node/daemon wiring remains future work]
 - Maintain current process-instance state.
 - Query by process instance and pipeline.
 - Expose owned snapshots.
@@ -904,10 +997,13 @@ These policies should be typed configuration, not scattered conditionals.
 ### Phase 5: Ipto Writer
 
 - Add writer boundary. [done: minimal `IptoWriter` trait and delivery helpers]
-- Add writer tasks per Ipto target.
-- Replay pending outbox entries. [partly done: single-entry delivery helper]
+- Add writer tasks per Ipto target. [partly done: target-aware drain helper and
+  lease-gated `VannakService` drain; background scheduling remains future work]
+- Replay pending outbox entries. [partly done: checkpoint-aware segment replay,
+  append-open outbox recovery, and service-level recovery helper]
 - Track acknowledged metadata writes. [partly done: segment offsets and
-  checkpoint data for acknowledged durable entries]
+  checkpoint data for acknowledged durable entries, exposed through
+  `VannakService::acknowledged_checkpoint`]
 - Surface degraded Ipto placement/write status.
 - Add concrete `IptoWriter` adapter against `ipto_rust::RepoService`.
   [done: `IptoRepoWriter` behind `ipto-writer` feature flag, with

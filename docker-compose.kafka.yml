@@ -1,0 +1,39 @@
+# Docker Compose for Vannak Kafka integration tests.
+#
+# Starts a single Redpanda broker with Kafka API exposed on localhost.
+#
+# Usage:
+#   docker compose -f docker-compose.kafka.yml up -d --wait redpanda
+#   VANNAK_KAFKA_INTEGRATION=1 cargo test --features kafka-client --test kafka_integration -- --nocapture
+#   docker compose -f docker-compose.kafka.yml down -v
+
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.6
+    container_name: vannak-test-kafka
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:${VANNAK_KAFKA_PORT:-19092}
+    ports:
+      - "${VANNAK_KAFKA_PORT:-19092}:19092"
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers=localhost:9092 >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
