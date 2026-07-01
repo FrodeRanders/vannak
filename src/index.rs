@@ -49,7 +49,10 @@ impl HotIndex {
     }
 
     pub fn ingest(&mut self, event: PipelineEvent) -> Result<IngestOutcome, IngestError> {
-        event.validate()?;
+        if let Err(error) = event.validate() {
+            self.rejected_events += 1;
+            return Err(error);
+        }
 
         if self.events_by_id.contains_key(event.event_id()) {
             self.duplicate_events += 1;
@@ -192,6 +195,10 @@ impl HotIndex {
         }
     }
 
+    pub fn contains_event(&self, event_id: &EventId) -> bool {
+        self.events_by_id.contains_key(event_id)
+    }
+
     fn events_for_ids(&self, event_ids: &[EventId]) -> Vec<PipelineEvent> {
         event_ids
             .iter()
@@ -278,6 +285,16 @@ mod tests {
         assert_eq!(index.ingest(event).unwrap(), IngestOutcome::Duplicate);
         assert_eq!(index.snapshot().event_count, 1);
         assert_eq!(index.snapshot().duplicate_events, 1);
+    }
+
+    #[test]
+    fn rejected_event_is_counted() {
+        let mut index = HotIndex::new();
+        let invalid = event("", EventKind::ProcessStarted);
+
+        assert!(index.ingest(invalid).is_err());
+        assert_eq!(index.snapshot().event_count, 0);
+        assert_eq!(index.snapshot().rejected_events, 1);
     }
 
     #[test]
@@ -368,6 +385,54 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id(), &EventId::from("e2"));
+    }
+
+    #[test]
+    fn late_activity_event_does_not_reopen_terminal_process() {
+        let mut index = HotIndex::new();
+        index
+            .ingest(event_at(
+                "e1",
+                "instance-a",
+                "2026-06-30T10:00:00Z",
+                EventKind::ProcessStarted,
+            ))
+            .unwrap();
+        index
+            .ingest(event_at(
+                "e2",
+                "instance-a",
+                "2026-06-30T10:00:05Z",
+                EventKind::ProcessCompleted,
+            ))
+            .unwrap();
+        index
+            .ingest(
+                event_at(
+                    "e3",
+                    "instance-a",
+                    "2026-06-30T10:00:03Z",
+                    EventKind::ActivityEntered,
+                )
+                .with_activity_id(ActivityId::from("extract")),
+            )
+            .unwrap();
+
+        let process = index
+            .process_instance(&ProcessInstanceQuery {
+                process_instance_id: ProcessInstanceId::from("instance-a"),
+            })
+            .unwrap();
+        assert_eq!(process.status, ProcessStatus::Completed);
+        assert_eq!(
+            process.completed_at,
+            Some(EventTimestamp::from("2026-06-30T10:00:05Z"))
+        );
+        assert!(
+            !process
+                .activities
+                .contains_key(&ActivityId::from("extract"))
+        );
     }
 
     #[test]

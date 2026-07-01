@@ -121,7 +121,9 @@ fn run() -> Result<(), String> {
         let path = config.outbox_path.clone().unwrap_or_else(|| {
             let dir = std::env::temp_dir().join("vannak");
             let _ = std::fs::create_dir_all(&dir);
-            dir.join("metadata-outbox.seg").to_string_lossy().to_string()
+            dir.join("metadata-outbox.seg")
+                .to_string_lossy()
+                .to_string()
         });
         let seg_id = config
             .outbox_segment_id
@@ -135,16 +137,15 @@ fn run() -> Result<(), String> {
     };
 
     // -- discover existing segments at startup --
-    if let Some(parent) = std::path::Path::new(&outbox_path).parent() {
-        if let Ok(discovery) = vannak::discover_segments(parent) {
-            if !discovery.is_empty() {
-                eprintln!(
-                    "vannak: discovered {} segment(s), {} invalid",
-                    discovery.segments.len(),
-                    discovery.invalid.len()
-                );
-            }
-        }
+    if let Some(parent) = std::path::Path::new(&outbox_path).parent()
+        && let Ok(discovery) = vannak::discover_segments(parent)
+        && !discovery.is_empty()
+    {
+        eprintln!(
+            "vannak: discovered {} segment(s), {} invalid",
+            discovery.segments.len(),
+            discovery.invalid.len()
+        );
     }
 
     // -- service --
@@ -221,9 +222,7 @@ fn run() -> Result<(), String> {
         let log_host = host.clone();
         let log_peer_id = peer_id.clone();
         std::thread::spawn(move || {
-            if let Err(e) =
-                run_raft_on_thread(&host, port, &peer_id, &data_dir, &peers, stop)
-            {
+            if let Err(e) = run_raft_on_thread(&host, port, &peer_id, &data_dir, &peers, stop) {
                 eprintln!("vannak: raft node error: {e}");
             }
         });
@@ -338,8 +337,9 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 let brokers = args[idx + 1].clone();
                 let group_id = args[idx + 2].clone();
                 let shards: usize = args[idx + 3].parse().map_err(|_| "invalid shards")?;
-                let mailbox_capacity: usize =
-                    args[idx + 4].parse().map_err(|_| "invalid mailbox capacity")?;
+                let mailbox_capacity: usize = args[idx + 4]
+                    .parse()
+                    .map_err(|_| "invalid mailbox capacity")?;
                 idx += 5;
                 let mut topics = Vec::new();
                 while idx < args.len() && !args[idx].starts_with("--") {
@@ -395,11 +395,8 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 let mut slots = Vec::new();
                 while idx + 1 < args.len() && !args[idx].starts_with("--") {
                     let target = IptoInstanceId::from(args[idx].clone());
-                    let vnodes: u32 =
-                        args[idx + 1].parse().map_err(|_| "invalid vnodes")?;
-                    slots.push(
-                        IptoPlacementSlot::new(target, vnodes).map_err(|e| e.to_string())?,
-                    );
+                    let vnodes: u32 = args[idx + 1].parse().map_err(|_| "invalid vnodes")?;
+                    slots.push(IptoPlacementSlot::new(target, vnodes).map_err(|e| e.to_string())?);
                     idx += 2;
                 }
                 if !slots.is_empty() {
@@ -494,11 +491,8 @@ fn run_raft_on_thread(
                 break;
             }
 
-            let accept_result = tokio::time::timeout(
-                Duration::from_millis(500),
-                listener.accept(),
-            )
-            .await;
+            let accept_result =
+                tokio::time::timeout(Duration::from_millis(500), listener.accept()).await;
 
             match accept_result {
                 Ok(Ok((mut stream, _addr))) => {
@@ -506,14 +500,13 @@ fn run_raft_on_thread(
                     tokio::spawn(async move {
                         let mut buf = bytes::BytesMut::with_capacity(8192);
                         loop {
-                            let envelope = match graft_transport::codec::read_envelope(
-                                &mut stream, &mut buf,
-                            )
-                            .await
-                            {
-                                Ok(e) => e,
-                                Err(_) => return,
-                            };
+                            let envelope =
+                                match graft_transport::codec::read_envelope(&mut stream, &mut buf)
+                                    .await
+                                {
+                                    Ok(e) => e,
+                                    Err(_) => return,
+                                };
                             let resp_payload =
                                 h.dispatch(&envelope.r#type, &envelope.payload).await;
                             let resp = graft_proto::Envelope {
@@ -576,24 +569,25 @@ fn spawn_kafka_consumer(config: &KafkaArgs, stop_token: Arc<AtomicBool>) {
     let topics = config.topics.clone();
 
     std::thread::spawn(move || {
-        let runtime = match SitasShardRuntime::start(SitasRuntimeConfig::new(shards, mailbox_capacity)) {
-            Ok(mut rt) => {
-                if let Err(e) = rt.start_mailbox_workers() {
-                    eprintln!("vannak: kafka consumer: failed to start workers: {e}");
+        let runtime =
+            match SitasShardRuntime::start(SitasRuntimeConfig::new(shards, mailbox_capacity)) {
+                Ok(mut rt) => {
+                    if let Err(e) = rt.start_mailbox_workers() {
+                        eprintln!("vannak: kafka consumer: failed to start workers: {e}");
+                        return;
+                    }
+                    rt
+                }
+                Err(e) => {
+                    eprintln!("vannak: kafka consumer: failed to start Sitas: {e}");
                     return;
                 }
-                rt
-            }
-            Err(e) => {
-                eprintln!("vannak: kafka consumer: failed to start Sitas: {e}");
-                return;
-            }
-        };
+            };
 
-    let mut consumer = match KafkaProcessConsumer::start(
-        KafkaProcessConsumerConfig::new(&brokers, &group_id, topics.iter().map(String::as_str))
-            .with_payload_format(KafkaPayloadFormat::DurgaJson),
-    ) {
+        let mut consumer = match KafkaProcessConsumer::start(
+            KafkaProcessConsumerConfig::new(&brokers, &group_id, topics.iter().map(String::as_str))
+                .with_payload_format(KafkaPayloadFormat::DurgaJson),
+        ) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("vannak: kafka consumer: failed to start: {e}");
@@ -614,11 +608,13 @@ fn spawn_kafka_consumer(config: &KafkaArgs, stop_token: Arc<AtomicBool>) {
                 Ok(None) => {}
                 Err(e) => eprintln!("vannak: kafka consumer: {e}"),
             }
-            if accepted > 0 && accepted % 1000 == 0 {
+            if accepted > 0 && accepted.is_multiple_of(1000) {
                 let snapshot = consumer.snapshot();
                 eprintln!(
                     "vannak: kafka accepted={accepted} pending={} paused={} polled={}",
-                    snapshot.pending_records, snapshot.paused_partitions.len(), snapshot.total_polled,
+                    snapshot.pending_records,
+                    snapshot.paused_partitions.len(),
+                    snapshot.total_polled,
                 );
             }
         }

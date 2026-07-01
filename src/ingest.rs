@@ -1055,7 +1055,10 @@ mod tests {
         let encoded = encode_pipeline_event(&event);
         let decoded = decode_pipeline_event(&encoded).unwrap();
         assert_eq!(decoded.event_id(), event.event_id());
-        assert_eq!(decoded.kind(), EventKind::Unknown("CUSTOM_ACTION".to_string()));
+        assert_eq!(
+            decoded.kind(),
+            EventKind::Unknown("CUSTOM_ACTION".to_string())
+        );
     }
 
     fn pipeline_event(event_id: &str, kind: EventKind) -> PipelineEvent {

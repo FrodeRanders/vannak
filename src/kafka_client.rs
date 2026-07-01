@@ -309,9 +309,12 @@ impl KafkaProcessConsumer {
         self.total_polled += 1;
         let message = result?;
         let payload = message.payload().ok_or(KafkaClientError::MissingPayload)?;
-        let event = self
-            .config
-            .decode_event(message.topic(), message.offset(), payload, &mut self.durga_compat)?;
+        let event = self.config.decode_event(
+            message.topic(),
+            message.offset(),
+            payload,
+            &mut self.durga_compat,
+        )?;
         let record = KafkaProcessRecord::new(
             KafkaTopicPartition::new(message.topic(), message.partition()),
             KafkaOffset(message.offset()),
@@ -739,9 +742,7 @@ impl MetadataRefJson {
             "dataContract" => Some(MetadataRef::DataContract(
                 crate::metadata::DataContractId::from(self.id),
             )),
-            "owner" => Some(MetadataRef::Owner(crate::metadata::OwnerId::from(
-                self.id,
-            ))),
+            "owner" => Some(MetadataRef::Owner(crate::metadata::OwnerId::from(self.id))),
             "classification" => Some(MetadataRef::Classification(
                 crate::metadata::ClassificationId::from(self.id),
             )),
@@ -1112,11 +1113,7 @@ mod tests {
             .unwrap();
 
         let refs = event.metadata_refs();
-        assert_eq!(
-            refs.len(),
-            3,
-            "all three metadata refs should be parsed"
-        );
+        assert_eq!(refs.len(), 3, "all three metadata refs should be parsed");
     }
 
     #[test]

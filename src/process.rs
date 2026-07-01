@@ -192,6 +192,15 @@ impl ProcessInstanceState {
     }
 
     pub fn apply(&mut self, event: &crate::ingest::PipelineEvent) {
+        if event.timestamp() < &self.last_updated_at {
+            return;
+        }
+
+        let was_terminal = matches!(
+            self.status,
+            ProcessStatus::Completed | ProcessStatus::Failed | ProcessStatus::Cancelled
+        );
+
         self.last_updated_at = event.timestamp().clone();
         self.process_version = event
             .process_version()
@@ -220,13 +229,17 @@ impl ProcessInstanceState {
 
         match event.kind() {
             EventKind::ProcessStarted => {
-                self.status = ProcessStatus::Active;
+                if !was_terminal {
+                    self.status = ProcessStatus::Active;
+                }
                 if self.started_at.is_none() {
                     self.started_at = Some(event.timestamp().clone());
                 }
             }
             EventKind::ActivityEntered => {
-                self.status = ProcessStatus::Active;
+                if !was_terminal {
+                    self.status = ProcessStatus::Active;
+                }
                 if let Some(activity_id) = event.activity_id() {
                     self.activities
                         .insert(activity_id.clone(), ActivityState::Entered);
@@ -235,19 +248,27 @@ impl ProcessInstanceState {
                 }
             }
             EventKind::ActivityCompleted => {
-                self.status = ProcessStatus::Active;
+                if !was_terminal {
+                    self.status = ProcessStatus::Active;
+                }
                 self.record_activity_terminal(event, ActivityState::Completed);
             }
             EventKind::ActivityEscalated => {
-                self.status = ProcessStatus::Active;
+                if !was_terminal {
+                    self.status = ProcessStatus::Active;
+                }
                 self.record_activity_terminal(event, ActivityState::Escalated);
             }
             EventKind::ActivityCancelled => {
-                self.status = ProcessStatus::Cancelled;
+                if !was_terminal {
+                    self.status = ProcessStatus::Cancelled;
+                }
                 self.record_activity_terminal(event, ActivityState::Cancelled);
             }
             EventKind::GatewayTaken => {
-                self.status = ProcessStatus::Active;
+                if !was_terminal {
+                    self.status = ProcessStatus::Active;
+                }
                 self.record_activity_terminal(event, ActivityState::GatewayTaken);
             }
             EventKind::ProcessCompleted => {

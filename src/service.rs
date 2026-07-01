@@ -130,11 +130,19 @@ impl VannakService {
         &mut self,
         event: PipelineEvent,
     ) -> Result<DurableProcessIngestResult, VannakServiceError> {
-        let offset = self
+        event.validate()?;
+        let journal = self
             .process_event_journal
             .as_mut()
-            .ok_or(VannakServiceError::ProcessEventJournalNotConfigured)?
-            .append_durable(&event)?;
+            .ok_or(VannakServiceError::ProcessEventJournalNotConfigured)?;
+        if self.hot_index.contains_event(event.event_id()) {
+            let offset = RecordOffset(journal.manifest().byte_len);
+            return Ok(DurableProcessIngestResult {
+                outcome: IngestOutcome::Duplicate,
+                offset,
+            });
+        }
+        let offset = journal.append_durable(&event)?;
         let outcome = self.hot_index.ingest(event)?;
         Ok(DurableProcessIngestResult { outcome, offset })
     }
@@ -690,6 +698,18 @@ mod tests {
         let replay = crate::ingest::replay_process_event_segment(&process_path).unwrap();
         assert_eq!(replay.summary.replayed_records, 1);
         assert_eq!(replay.events[0].event, event);
+
+        let duplicate = service.ingest_process_event_durable(event.clone()).unwrap();
+        assert_eq!(duplicate.outcome, IngestOutcome::Duplicate);
+        assert_eq!(
+            service
+                .snapshot()
+                .process_event_journal
+                .as_ref()
+                .unwrap()
+                .record_count,
+            1
+        );
 
         fs::remove_file(outbox_path).unwrap();
         fs::remove_file(process_path).unwrap();

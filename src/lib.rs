@@ -23,9 +23,9 @@
 //! boundaries rather than changing the core event model.
 
 pub mod cluster;
-pub mod data;
 #[cfg(feature = "daemon")]
 pub mod daemon;
+pub mod data;
 pub mod durga;
 pub mod index;
 pub mod ingest;
@@ -52,6 +52,11 @@ pub use cluster::{
     CheckpointEpoch, CheckpointManifest, ClusterControlCommand, ClusterControlError,
     ClusterControlState, IptoPlacementMap, IptoPlacementRange, IptoPlacementRing,
     IptoPlacementSlot, LeaseEpoch, MetadataOutboxCheckpoint, NodeId, PlacementEpoch, WriterLease,
+};
+#[cfg(feature = "daemon")]
+pub use daemon::{
+    BackgroundWriterConfig, BackgroundWriterSnapshot, Daemon, DaemonConfig, DaemonSnapshot,
+    SegmentDiscoveryResult, discover_segments, run_background_writer, start_health_server,
 };
 pub use data::{
     ActiveMetadata, DataIndividualId, DataIndividualMetadataEvent, DataIndividualShardId,
@@ -92,6 +97,7 @@ pub use metadata::{
     ClassificationId, DataContractId, DatasetId, FieldId, LineageEdgeId, MetadataObjectId,
     MetadataRef, MetadataVersion, OwnerId, PipelineDefinitionId, SchemaId,
 };
+pub use observability::{DurgaCompatibilitySnapshot, HotIndexSnapshot};
 pub use process::{
     ActivityId, ActivityState, BusinessKey, CorrelationId, EnvironmentId, ErrorInfo, EventKind,
     EventStatus, PipelineId, ProcessDefinitionId, ProcessInstanceId, ProcessInstanceSnapshot,
@@ -101,12 +107,6 @@ pub use query::{
     ActivityMetadataQuery, DataIndividualMetadataQuery, EventQuery, ImpactQuery, PipelineQuery,
     ProcessInstanceQuery, ProcessMetadataQuery, ProcessStatusQuery, QueryLimit, QueryResult,
     TimeRangeQuery,
-};
-pub use observability::{DurgaCompatibilitySnapshot, HotIndexSnapshot};
-#[cfg(feature = "daemon")]
-pub use daemon::{
-    BackgroundWriterConfig, BackgroundWriterSnapshot, Daemon, DaemonConfig, DaemonSnapshot,
-    SegmentDiscoveryResult, discover_segments, run_background_writer, start_health_server,
 };
 pub use runtime::{
     BoundedIngestRuntime, BoundedIngestRuntimeSnapshot, IngestDrainSummary, IngestQueueSnapshot,

@@ -159,13 +159,13 @@ impl IptoWritePayload {
         }
 
         // Sentinel PROV-O relation attributes from event identity fields.
-        if mapping.relations_enabled {
-            if let Some(ref activity_id) = event.activity_id() {
-                attributes.insert(
-                    IptoAttributeName::from("vannak:relation:wasGeneratedBy"),
-                    MetadataValue::string(activity_id.as_str()),
-                );
-            }
+        if mapping.relations_enabled
+            && let Some(activity_id) = event.activity_id()
+        {
+            attributes.insert(
+                IptoAttributeName::from("vannak:relation:wasGeneratedBy"),
+                MetadataValue::string(activity_id.as_str()),
+            );
         }
 
         Self {
@@ -409,6 +409,7 @@ impl MetadataOutbox {
             .filter(|entry| {
                 entry.status == OutboxStatus::Acknowledged && entry.payload.target == *target
             })
+            .filter(|entry| entry.payload.shard_id == data_individual_shard_id)
             .filter_map(|entry| Some((entry.record_offset?, entry.payload.mapping_version.clone())))
             .max_by_key(|(offset, _)| *offset)
             .map(
@@ -867,8 +868,8 @@ pub fn replay_metadata_outbox_segment_for_shard_range(
 /// `[start, end]`, then drains the resulting pending entries through the
 /// given writer. The writer must be connected to the new Ipto instance.
 ///
-/// Idempotent: if some entries already exist on the target (e.g. from a
-/// previous partial rebalance), they are skipped via correlation-id lookup.
+/// Idempotency is provided by the supplied writer. `IptoRepoWriter`, for
+/// example, checks correlation IDs before creating units.
 ///
 /// Returns a summary of how many entries were attempted and acknowledged.
 pub fn rebalance_shard_range_to(
@@ -1200,6 +1201,49 @@ mod tests {
         assert_eq!(pending.payload(), &payload);
         assert_eq!(pending.record_offset(), Some(offset));
 
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn acknowledged_checkpoint_is_scoped_to_shard_and_target() {
+        let path = temp_segment_path("checkpoint-shard-scope");
+        let first = sample_payload();
+        let mut second = sample_payload();
+        second.shard_id = DataIndividualShardId(99);
+        second.idempotency_key = IdempotencyKey::from("data-99:metadata-event-99");
+        let mut outbox = SegmentBackedMetadataOutbox::create(
+            &path,
+            SegmentId::from("outbox-segment-c"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let DurableOutboxEnqueueResult::Enqueued {
+            offset: first_offset,
+        } = outbox.enqueue_durable(first.clone()).unwrap()
+        else {
+            unreachable!("first payload should be new")
+        };
+        let DurableOutboxEnqueueResult::Enqueued {
+            offset: second_offset,
+        } = outbox.enqueue_durable(second.clone()).unwrap()
+        else {
+            unreachable!("second payload should be new")
+        };
+        assert!(outbox.outbox_mut().acknowledge(&first.idempotency_key));
+        assert!(outbox.outbox_mut().acknowledge(&second.idempotency_key));
+
+        let first_checkpoint = outbox
+            .acknowledged_checkpoint(first.shard_id, &first.target, CheckpointEpoch(1))
+            .unwrap();
+        let second_checkpoint = outbox
+            .acknowledged_checkpoint(second.shard_id, &second.target, CheckpointEpoch(1))
+            .unwrap();
+
+        assert_eq!(first_checkpoint.last_acknowledged_offset, first_offset);
+        assert_eq!(second_checkpoint.last_acknowledged_offset, second_offset);
+
+        outbox.seal().unwrap();
         fs::remove_file(path).unwrap();
     }
 

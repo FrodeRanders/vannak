@@ -314,10 +314,7 @@ impl IptoRepoWriter {
     ///
     /// Each relation unit gets a derived idempotency key so that replay is
     /// safe across partial writes of entity + relation units.
-    fn write_relation_units(
-        &mut self,
-        payload: &IptoWritePayload,
-    ) -> Result<(), IptoWriteError> {
+    fn write_relation_units(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError> {
         for (attr_name, value) in &payload.attributes {
             let relation_key = attr_name.as_str().strip_prefix("vannak:relation:");
             let Some(relation_key) = relation_key else {
@@ -354,9 +351,9 @@ impl IptoRepoWriter {
             }
 
             let unit = self.build_relation_unit(target_attr, &target_value, &corrid)?;
-            self.repo
-                .store_unit_json(unit)
-                .map_err(|e| IptoWriteError::retryable(format!("store relation unit failed: {e}")))?;
+            self.repo.store_unit_json(unit).map_err(|e| {
+                IptoWriteError::retryable(format!("store relation unit failed: {e}"))
+            })?;
         }
 
         Ok(())
@@ -368,10 +365,14 @@ impl IptoRepoWriter {
         value: &str,
         corrid: &str,
     ) -> Result<Value, IptoWriteError> {
-        let (attr_id, attr_type) = self.attr_ids.get(&IptoAttributeName::from(attr_qualname))
-            .ok_or_else(|| IptoWriteError::permanent(
-                format!("relation attribute {attr_qualname} not found in SDL configuration"),
-            ))?;
+        let (attr_id, attr_type) = self
+            .attr_ids
+            .get(&IptoAttributeName::from(attr_qualname))
+            .ok_or_else(|| {
+                IptoWriteError::permanent(format!(
+                    "relation attribute {attr_qualname} not found in SDL configuration"
+                ))
+            })?;
 
         let attr_type_num = match attr_type.as_str() {
             "string" => 1,
@@ -384,7 +385,9 @@ impl IptoRepoWriter {
             _ => 1,
         };
 
-        let label_attr = if let Some(&(label_id, _)) = self.attr_ids.get(&IptoAttributeName::from("rdfs:label")) {
+        let label_attr = if let Some(&(label_id, _)) =
+            self.attr_ids.get(&IptoAttributeName::from("rdfs:label"))
+        {
             Some(serde_json::json!({
                 "attrid": label_id,
                 "attrtype": 1,

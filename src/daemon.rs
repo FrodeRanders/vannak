@@ -93,7 +93,9 @@ pub fn discover_segments(dir: impl AsRef<Path>) -> Result<SegmentDiscoveryResult
         }
     }
 
-    result.segments.sort_by(|left, right| left.path.cmp(&right.path));
+    result
+        .segments
+        .sort_by(|left, right| left.path.cmp(&right.path));
     result.invalid.sort();
 
     Ok(result)
@@ -408,9 +410,7 @@ fn handle_health_request(
     background_writer: &Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
     start_time: Instant,
 ) {
-    let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| {
-        unreachable!()
-    }));
+    let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| unreachable!()));
 
     let mut request_line = String::new();
     if reader.read_line(&mut request_line).is_err() {
@@ -474,9 +474,7 @@ fn handle_health_request(
         return;
     }
 
-    let status = if request_line.starts_with("GET /health") {
-        "200 OK"
-    } else if request_line.starts_with("GET /") {
+    let status = if request_line.starts_with("GET /") {
         "200 OK"
     } else {
         "404 Not Found"
@@ -503,11 +501,19 @@ fn handle_ingest_request(
 ) -> (&'static str, String) {
     let mut svc = match service.lock() {
         Ok(svc) => svc,
-        Err(_) => return ("503 Service Unavailable", r#"{"error":"service unavailable"}"#.to_string()),
+        Err(_) => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"service unavailable"}"#.to_string(),
+            );
+        }
     };
 
     let Some(event) = parse_ingest_event_json(body) else {
-        return ("400 Bad Request", r#"{"error":"invalid event JSON"}"#.to_string());
+        return (
+            "400 Bad Request",
+            r#"{"error":"invalid event JSON"}"#.to_string(),
+        );
     };
 
     match svc.ingest_process_event(event) {
@@ -517,9 +523,7 @@ fn handle_ingest_request(
         Ok(crate::index::IngestOutcome::Duplicate) => {
             ("200 OK", r#"{"status":"duplicate"}"#.to_string())
         }
-        Err(e) => {
-            ("400 Bad Request", format!(r#"{{"error":"{}"}}"#, e))
-        }
+        Err(e) => ("400 Bad Request", format!(r#"{{"error":"{}"}}"#, e)),
     }
 }
 
@@ -560,7 +564,7 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
         });
 
     let timestamp = extract_json_string_field(json, "timestamp")
-        .map(|ts| crate::ingest::EventTimestamp::from(ts))
+        .map(crate::ingest::EventTimestamp::from)
         .unwrap_or_else(|| crate::ingest::EventTimestamp::from("1970-01-01T00:00:00Z"));
 
     let tenant_id = extract_json_string_field(json, "tenant_id")
@@ -571,8 +575,8 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
         .map(crate::process::EnvironmentId::from)
         .unwrap_or_else(|| crate::process::EnvironmentId::from("demo"));
 
-    let activity_id = extract_json_string_field(json, "activity_id")
-        .map(crate::process::ActivityId::from);
+    let activity_id =
+        extract_json_string_field(json, "activity_id").map(crate::process::ActivityId::from);
 
     let mut event = crate::ingest::PipelineEvent::new(
         event_id,
@@ -594,65 +598,75 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
     Some(event)
 }
 
-fn handle_query_request(
-    service: &Arc<Mutex<VannakService>>,
-    body: &str,
-) -> (&'static str, String) {
+fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'static str, String) {
     let svc = match service.lock() {
         Ok(svc) => svc,
-        Err(_) => return ("503 Service Unavailable", r#"{"error":"service unavailable"}"#.to_string()),
+        Err(_) => {
+            return (
+                "503 Service Unavailable",
+                r#"{"error":"service unavailable"}"#.to_string(),
+            );
+        }
     };
 
-    if body.contains("\"type\":\"ProcessInstance\"") {
-        if let Some(id) = extract_json_string_field(body, "process_instance_id") {
-            let result = svc.process_instance(&crate::query::ProcessInstanceQuery {
-                process_instance_id: crate::process::ProcessInstanceId::from(id),
-            });
-            match result {
-                Some(snap) => {
-                    let json = format!(
-                        r#"{{"type":"ProcessInstances","instance":[{{"process_instance_id":"{}","pipeline_id":"{}","status":"{:?}"}}]}}"#,
-                        snap.process_instance_id.as_str(),
-                        snap.pipeline_id.as_str(),
-                        snap.status,
-                    );
-                    return ("200 OK", json);
-                }
-                None => return ("200 OK", r#"{"type":"ProcessInstances","instance":[]}"#.to_string()),
+    if body.contains("\"type\":\"ProcessInstance\"")
+        && let Some(id) = extract_json_string_field(body, "process_instance_id")
+    {
+        let result = svc.process_instance(&crate::query::ProcessInstanceQuery {
+            process_instance_id: crate::process::ProcessInstanceId::from(id),
+        });
+        match result {
+            Some(snap) => {
+                let json = format!(
+                    r#"{{"type":"ProcessInstances","instance":[{{"process_instance_id":"{}","pipeline_id":"{}","status":"{:?}"}}]}}"#,
+                    snap.process_instance_id.as_str(),
+                    snap.pipeline_id.as_str(),
+                    snap.status,
+                );
+                return ("200 OK", json);
+            }
+            None => {
+                return (
+                    "200 OK",
+                    r#"{"type":"ProcessInstances","instance":[]}"#.to_string(),
+                );
             }
         }
     }
 
-    if body.contains("\"type\":\"Pipeline\"") {
-        if let Some(id) = extract_json_string_field(body, "pipeline_id") {
-            let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
-            let result = svc.pipeline_instances(&crate::query::PipelineQuery {
-                pipeline_id: crate::process::PipelineId::from(id),
-                limit: crate::query::QueryLimit::new(limit_val as usize),
-            });
-            return ("200 OK", serialize_query_result(&result));
-        }
+    if body.contains("\"type\":\"Pipeline\"")
+        && let Some(id) = extract_json_string_field(body, "pipeline_id")
+    {
+        let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
+        let result = svc.pipeline_instances(&crate::query::PipelineQuery {
+            pipeline_id: crate::process::PipelineId::from(id),
+            limit: crate::query::QueryLimit::new(limit_val as usize),
+        });
+        return ("200 OK", serialize_query_result(&result));
     }
 
-    if body.contains("\"type\":\"ProcessStatus\"") {
-        if let Some(status_str) = extract_json_string_field(body, "status") {
-            let status = match status_str.as_str() {
-                "Active" => crate::process::ProcessStatus::Active,
-                "Completed" => crate::process::ProcessStatus::Completed,
-                "Failed" => crate::process::ProcessStatus::Failed,
-                "Cancelled" => crate::process::ProcessStatus::Cancelled,
-                _ => crate::process::ProcessStatus::Active,
-            };
-            let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
-            let result = svc.process_instances_by_status(&crate::query::ProcessStatusQuery {
-                status,
-                limit: crate::query::QueryLimit::new(limit_val as usize),
-            });
-            return ("200 OK", serialize_query_result(&result));
-        }
+    if body.contains("\"type\":\"ProcessStatus\"")
+        && let Some(status_str) = extract_json_string_field(body, "status")
+    {
+        let status = match status_str.as_str() {
+            "Active" => crate::process::ProcessStatus::Active,
+            "Completed" => crate::process::ProcessStatus::Completed,
+            "Failed" => crate::process::ProcessStatus::Failed,
+            "Cancelled" => crate::process::ProcessStatus::Cancelled,
+            _ => crate::process::ProcessStatus::Active,
+        };
+        let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
+        let result = svc.process_instances_by_status(&crate::query::ProcessStatusQuery {
+            status,
+            limit: crate::query::QueryLimit::new(limit_val as usize),
+        });
+        return ("200 OK", serialize_query_result(&result));
     }
 
-    ("400 Bad Request", r#"{"error":"invalid query"}"#.to_string())
+    (
+        "400 Bad Request",
+        r#"{"error":"invalid query"}"#.to_string(),
+    )
 }
 
 fn serialize_query_result(result: &crate::query::QueryResult) -> String {
@@ -669,7 +683,10 @@ fn serialize_query_result(result: &crate::query::QueryResult) -> String {
                     )
                 })
                 .collect();
-            format!(r#"{{"type":"ProcessInstances","instance":[{}]}}"#, items.join(","))
+            format!(
+                r#"{{"type":"ProcessInstances","instance":[{}]}}"#,
+                items.join(",")
+            )
         }
         crate::query::QueryResult::Events(events) => {
             let items: Vec<String> = events
@@ -698,7 +715,10 @@ fn serialize_query_result(result: &crate::query::QueryResult) -> String {
                     )
                 })
                 .collect();
-            format!(r#"{{"type":"MetadataEvents","events":[{}]}}"#, items.join(","))
+            format!(
+                r#"{{"type":"MetadataEvents","events":[{}]}}"#,
+                items.join(",")
+            )
         }
     }
 }
@@ -727,7 +747,10 @@ fn build_health_json(
     start_time: Instant,
 ) -> String {
     let svc_snapshot = service.lock().map(|svc| svc.snapshot()).ok();
-    let bw_snapshot = background_writer.lock().ok().and_then(|guard| guard.clone());
+    let bw_snapshot = background_writer
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
     let uptime = start_time.elapsed().as_secs();
 
     let mut parts: Vec<String> = Vec::new();
@@ -829,10 +852,12 @@ pub fn fanout_process_instance_query(
         let svc = service.lock().unwrap();
         svc.process_instance(query)
     };
-    let mut instances: Vec<crate::process::ProcessInstanceSnapshot> =
-        local.into_iter().collect();
+    let mut instances: Vec<crate::process::ProcessInstanceSnapshot> = local.into_iter().collect();
     let mut failed = Vec::new();
-    let seen_ids: Vec<_> = instances.iter().map(|i| i.process_instance_id.clone()).collect();
+    let seen_ids: Vec<_> = instances
+        .iter()
+        .map(|i| i.process_instance_id.clone())
+        .collect();
 
     for peer in &config.peers {
         let json = format!(
@@ -917,7 +942,8 @@ pub fn fanout_process_status_query(
     for peer in &config.peers {
         let json = format!(
             r#"{{"type":"ProcessStatus","status":"{:?}","limit":{}}}"#,
-            query.status, query.limit.value(),
+            query.status,
+            query.limit.value(),
         );
         match send_query_to_peer(peer, &json, config.connect_timeout, config.read_timeout) {
             Ok(Some(crate::query::QueryResult::ProcessInstances(mut more))) => {
@@ -946,18 +972,26 @@ fn send_query_to_peer(
     connect_timeout: Duration,
     read_timeout: Duration,
 ) -> Result<Option<crate::query::QueryResult>, String> {
-    let mut stream =
-        TcpStream::connect_timeout(&peer.parse::<std::net::SocketAddr>().map_err(|e| e.to_string())?, connect_timeout)
-            .map_err(|e| e.to_string())?;
+    let mut stream = TcpStream::connect_timeout(
+        &peer
+            .parse::<std::net::SocketAddr>()
+            .map_err(|e| e.to_string())?,
+        connect_timeout,
+    )
+    .map_err(|e| e.to_string())?;
 
     let request = format!(
         "POST /query HTTP/1.1\r\nHost: {peer}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
         json_body.len(),
     );
-    stream.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
-    stream.set_read_timeout(Some(read_timeout)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|e| e.to_string())?;
 
     let mut reader = BufReader::new(&stream);
     let mut response = String::new();
@@ -982,7 +1016,9 @@ fn send_query_to_peer(
     }
 
     let mut body = String::new();
-    reader.read_to_string(&mut body).map_err(|e| e.to_string())?;
+    reader
+        .read_to_string(&mut body)
+        .map_err(|e| e.to_string())?;
 
     Ok(parse_query_result_json(&body))
 }
@@ -1094,9 +1130,11 @@ pub fn detect_placement_change(
     // Scan through the shard space and find contiguous ranges where the
     // target instance changed. We sample at a reasonable granularity.
     const SAMPLE_STEP: u64 = 1;
-    let mut range_start: Option<
-        (crate::data::DataIndividualShardId, &crate::ipto::IptoInstanceId, &crate::ipto::IptoInstanceId),
-    > = None;
+    let mut range_start: Option<(
+        crate::data::DataIndividualShardId,
+        &crate::ipto::IptoInstanceId,
+        &crate::ipto::IptoInstanceId,
+    )> = None;
 
     // Scan from 0 upward, looking for changes.
     let mut shard = 0u64;
@@ -1323,14 +1361,8 @@ impl Daemon {
         let stop_token = self.stop_token.clone();
 
         std::thread::spawn(move || {
-            let snapshot = run_background_writer(
-                service,
-                control_state,
-                node_id,
-                writer,
-                config,
-                stop_token,
-            );
+            let snapshot =
+                run_background_writer(service, control_state, node_id, writer, config, stop_token);
             *bw_snapshot_clone.lock().unwrap() = Some(snapshot);
         });
 
@@ -1398,9 +1430,7 @@ mod tests {
     };
     use crate::ingest::EventTimestamp;
     use crate::ipto::{IptoInstanceId, IptoMapping};
-    use crate::process::{
-        EnvironmentId, PipelineId, ProcessInstanceId, TenantId,
-    };
+    use crate::process::{EnvironmentId, PipelineId, ProcessInstanceId, TenantId};
     use crate::storage::{SegmentId, SegmentWriter};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1466,16 +1496,11 @@ mod tests {
         let svc = VannakService::create(
             IptoPlacementMap::new(
                 PlacementEpoch(1),
-                vec![IptoPlacementSlot::new(
-                    IptoInstanceId::from("ipto-a"),
-                    1,
-                )
-                .unwrap()],
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
                 vec![],
             )
             .unwrap(),
-            IptoMapping::new("v1")
-                .map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
+            IptoMapping::new("v1").map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
             &path,
             SegmentId::from("health-seg"),
             NodeId::from("node-a"),
@@ -1504,23 +1529,22 @@ mod tests {
         let svc = VannakService::create(
             IptoPlacementMap::new(
                 PlacementEpoch(1),
-                vec![IptoPlacementSlot::new(
-                    IptoInstanceId::from("ipto-a"),
-                    1,
-                )
-                .unwrap()],
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
                 vec![],
             )
             .unwrap(),
-            IptoMapping::new("v1")
-                .map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
+            IptoMapping::new("v1").map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
             &path,
             SegmentId::from("daemon-seg"),
             NodeId::from("node-a"),
         )
         .unwrap();
 
-        let daemon = Daemon::new(svc, DaemonConfig::default(), BackgroundWriterConfig::default());
+        let daemon = Daemon::new(
+            svc,
+            DaemonConfig::default(),
+            BackgroundWriterConfig::default(),
+        );
         assert!(!daemon.is_stopping());
 
         let bw_snap = Arc::new(Mutex::new(None::<BackgroundWriterSnapshot>));
@@ -1544,8 +1568,7 @@ mod tests {
                 vec![],
             )
             .unwrap(),
-            IptoMapping::new("v1")
-                .map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
+            IptoMapping::new("v1").map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
             &path,
             SegmentId::from("bw-seg"),
             NodeId::from("node-a"),
@@ -1607,7 +1630,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("vannak-daemon-{}-{}", std::process::id(), nanos));
+        let dir =
+            std::env::temp_dir().join(format!("vannak-daemon-{}-{}", std::process::id(), nanos));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -1618,7 +1642,10 @@ mod tests {
     }
 
     impl IptoWriter for RecordingWriter {
-        fn write(&mut self, _payload: &crate::ipto::IptoWritePayload) -> Result<(), crate::ipto::IptoWriteError> {
+        fn write(
+            &mut self,
+            _payload: &crate::ipto::IptoWritePayload,
+        ) -> Result<(), crate::ipto::IptoWriteError> {
             self.written += 1;
             Ok(())
         }
