@@ -982,7 +982,8 @@ These policies should be typed configuration, not scattered conditionals.
   `ShardLocalRuntime` and `BoundedIngestRuntime` plus feature-gated
   `SitasShardRuntime` with actual Sitas executor submission, shard-local hot
   indexes, bounded process-event mailboxes, explicit drains, fanout queries,
-  backpressure, and owned snapshots; node/daemon wiring remains future work]
+  backpressure, and owned snapshots; daemon wiring done in
+  `daemon.rs` with `Daemon`, health endpoint, and background writer]
 - Maintain current process-instance state.
 - Query by process instance and pipeline.
 - Expose owned snapshots.
@@ -1014,8 +1015,9 @@ These policies should be typed configuration, not scattered conditionals.
 ### Phase 5: Ipto Writer
 
 - Add writer boundary. [done: minimal `IptoWriter` trait and delivery helpers]
-- Add writer tasks per Ipto target. [partly done: target-aware drain helper and
-  lease-gated `VannakService` drain; background scheduling remains future work]
+- Add writer tasks per Ipto target. [done: target-aware drain helper,
+  lease-gated `VannakService` drain, and `daemon.rs` background writer
+  scheduling with configurable timers and per-cycle `IptoWriter` access]
 - Replay pending outbox entries. [partly done: checkpoint-aware segment replay,
   append-open outbox recovery, and service-level recovery helper]
 - Track acknowledged metadata writes. [partly done: segment offsets and

@@ -1,43 +1,68 @@
-# Docker Compose for a 3-node Vannak Raft cluster.
+# Vannak 3-node Raft cluster with daemon service plane.
 #
-# Nodes discover each other via explicit peer specs using Docker's internal
-# DNS (container name → IP resolution). No CoreDNS or static IPs needed.
+# Each node runs the `vannak` supervisor binary with:
+#   - Raft control plane (port 10081)
+#   - Daemon health/query HTTP server (port 9090)
+#   - Shared metadata outbox
 #
 # Usage:
-#   docker compose -f docker-compose.cluster.yml build
-#   docker compose -f docker-compose.cluster.yml up -d
-#   docker compose -f docker-compose.cluster.yml down -v
+#   docker compose -f docker-compose.cluster.yml up --build
+#
+# Health checks:
+#   curl http://127.0.0.1:9090/health   (node-1 daemon)
+#   docker exec vannak-1 vannak probe 127.0.0.1 10081
 
 services:
   vannak-1:
     build:
       context: ..
       dockerfile: vannak/Dockerfile
-    image: vannak-node:local
     container_name: vannak-1
     volumes:
       - vannak-1-data:/data
-    command: 0.0.0.0 10081 vannak-1 /data vannak-2@vannak-2:10081 vannak-3@vannak-3:10081
+    ports:
+      - "19090:9090"
+    command:
+      --raft 0.0.0.0 10081 vannak-1 /data vannak-2@vannak-2:10081 vannak-3@vannak-3:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-1
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
 
   vannak-2:
     build:
       context: ..
       dockerfile: vannak/Dockerfile
-    image: vannak-node:local
     container_name: vannak-2
     volumes:
       - vannak-2-data:/data
-    command: 0.0.0.0 10081 vannak-2 /data vannak-1@vannak-1:10081 vannak-3@vannak-3:10081
+    ports:
+      - "19091:9090"
+    command:
+      --raft 0.0.0.0 10081 vannak-2 /data vannak-1@vannak-1:10081 vannak-3@vannak-3:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-2
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
 
   vannak-3:
     build:
       context: ..
       dockerfile: vannak/Dockerfile
-    image: vannak-node:local
     container_name: vannak-3
     volumes:
       - vannak-3-data:/data
-    command: 0.0.0.0 10081 vannak-3 /data vannak-1@vannak-1:10081 vannak-2@vannak-2:10081
+    ports:
+      - "19092:9090"
+    command:
+      --raft 0.0.0.0 10081 vannak-3 /data vannak-1@vannak-1:10081 vannak-2@vannak-2:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-3
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
 
 volumes:
   vannak-1-data:

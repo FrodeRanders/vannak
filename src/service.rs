@@ -170,7 +170,7 @@ impl VannakService {
     pub fn drain_metadata_for_target(
         &mut self,
         target: &IptoInstanceId,
-        writer: &mut impl IptoWriter,
+        writer: &mut (impl IptoWriter + ?Sized),
         max_attempts: usize,
     ) -> MetadataOutboxDrainSummary {
         drain_pending_outbox_for_target(
@@ -186,7 +186,7 @@ impl VannakService {
         control_state: &ClusterControlState,
         node_id: &NodeId,
         target: &IptoInstanceId,
-        writer: &mut impl IptoWriter,
+        writer: &mut (impl IptoWriter + ?Sized),
         max_attempts: usize,
     ) -> Result<MetadataOutboxDrainSummary, VannakServiceError> {
         let Some(lease) = control_state.writer_lease(target) else {

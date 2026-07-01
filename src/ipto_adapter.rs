@@ -65,6 +65,9 @@ enum Attributes @attributeRegistry {
     prov_endedAtTime       @attribute(datatype: TIME,   array: false, name: \"prov:endedAtTime\",       uri: \"http://www.w3.org/ns/prov#endedAtTime\")
     prov_invalidatedAtTime @attribute(datatype: TIME,   array: false, name: \"prov:invalidatedAtTime\", uri: \"http://www.w3.org/ns/prov#invalidatedAtTime\")
     prov_wasAttributedTo   @attribute(datatype: STRING, array: false, name: \"prov:wasAttributedTo\",   uri: \"http://www.w3.org/ns/prov#wasAttributedTo\")
+    prov_wasGeneratedBy    @attribute(datatype: STRING, array: false, name: \"prov:wasGeneratedBy\",    uri: \"http://www.w3.org/ns/prov#wasGeneratedBy\")
+    prov_used              @attribute(datatype: STRING, array: false, name: \"prov:used\",              uri: \"http://www.w3.org/ns/prov#used\")
+    prov_wasDerivedFrom    @attribute(datatype: STRING, array: false, name: \"prov:wasDerivedFrom\",    uri: \"http://www.w3.org/ns/prov#wasDerivedFrom\")
     prov_value             @attribute(datatype: STRING, array: false, name: \"prov:value\",             uri: \"http://www.w3.org/ns/prov#value\")
     prov_location          @attribute(datatype: STRING, array: false, name: \"prov:location\",          uri: \"http://www.w3.org/ns/prov#location\")
     prov_type              @attribute(datatype: STRING, array: false, name: \"prov:type\",              uri: \"http://www.w3.org/ns/prov#type\")
@@ -90,6 +93,21 @@ type ProvEntity @template(name: \"ProvEntity\") {
     location:          String @use(attribute: prov_location)
     type:              String @use(attribute: prov_type)
     dataIndividualId:  String @use(attribute: vannak_data_individual)
+}
+
+type ProvGeneration @template(name: \"ProvGeneration\") {
+    wasGeneratedBy: String @use(attribute: prov_wasGeneratedBy)
+    label:          String @use(attribute: rdfs_label)
+}
+
+type ProvUsage @template(name: \"ProvUsage\") {
+    used:  String @use(attribute: prov_used)
+    label: String @use(attribute: rdfs_label)
+}
+
+type ProvDerivation @template(name: \"ProvDerivation\") {
+    wasDerivedFrom: String @use(attribute: prov_wasDerivedFrom)
+    label:          String @use(attribute: rdfs_label)
 }
 ";
 
@@ -144,6 +162,9 @@ impl IptoRepoWriter {
             ("prov:endedAtTime", "time"),
             ("prov:invalidatedAtTime", "time"),
             ("prov:wasAttributedTo", "string"),
+            ("prov:wasGeneratedBy", "string"),
+            ("prov:used", "string"),
+            ("prov:wasDerivedFrom", "string"),
             ("prov:value", "string"),
             ("prov:location", "string"),
             ("prov:type", "string"),
@@ -268,15 +289,126 @@ impl IptoWriter for IptoRepoWriter {
             .get_unit_by_corrid_json(&corrid)
             .map_err(|e| IptoWriteError::retryable(format!("corrid lookup failed: {e}")))?
         {
-            Some(_existing) => Ok(()),
+            Some(_existing) => {}
             None => {
                 let unit = self.build_unit_payload(payload)?;
                 self.repo
                     .store_unit_json(unit)
                     .map_err(|e| IptoWriteError::retryable(format!("store unit failed: {e}")))?;
-                Ok(())
             }
         }
+
+        self.write_relation_units(payload)?;
+
+        Ok(())
+    }
+}
+
+impl IptoRepoWriter {
+    /// Detects sentinel PROV-O relation attributes and writes relation units.
+    ///
+    /// Sentinel attributes use the prefix `vannak:relation:`:
+    /// - `vannak:relation:wasGeneratedBy` → `ProvGeneration` unit
+    /// - `vannak:relation:wasDerivedFrom` → `ProvDerivation` unit
+    /// - `vannak:relation:used`            → `ProvUsage` unit
+    ///
+    /// Each relation unit gets a derived idempotency key so that replay is
+    /// safe across partial writes of entity + relation units.
+    fn write_relation_units(
+        &mut self,
+        payload: &IptoWritePayload,
+    ) -> Result<(), IptoWriteError> {
+        for (attr_name, value) in &payload.attributes {
+            let relation_key = attr_name.as_str().strip_prefix("vannak:relation:");
+            let Some(relation_key) = relation_key else {
+                continue;
+            };
+
+            let target_attr = match relation_key {
+                "wasGeneratedBy" => "prov:wasGeneratedBy",
+                "wasDerivedFrom" => "prov:wasDerivedFrom",
+                "used" => "prov:used",
+                _ => continue,
+            };
+
+            let target_value = match value {
+                MetadataValue::String(s) => s.clone(),
+                other => format!("{other:?}"),
+            };
+
+            let relation_corrid_key = format!(
+                "{}:relation:{}:{}",
+                payload.idempotency_key.as_str(),
+                relation_key,
+                target_value,
+            );
+            let corrid = self.corrid_for_key(&IdempotencyKey::from(&*relation_corrid_key));
+
+            if self
+                .repo
+                .get_unit_by_corrid_json(&corrid)
+                .map_err(|e| IptoWriteError::retryable(format!("corrid lookup failed: {e}")))?
+                .is_some()
+            {
+                continue;
+            }
+
+            let unit = self.build_relation_unit(target_attr, &target_value, &corrid)?;
+            self.repo
+                .store_unit_json(unit)
+                .map_err(|e| IptoWriteError::retryable(format!("store relation unit failed: {e}")))?;
+        }
+
+        Ok(())
+    }
+
+    fn build_relation_unit(
+        &self,
+        attr_qualname: &str,
+        value: &str,
+        corrid: &str,
+    ) -> Result<Value, IptoWriteError> {
+        let (attr_id, attr_type) = self.attr_ids.get(&IptoAttributeName::from(attr_qualname))
+            .ok_or_else(|| IptoWriteError::permanent(
+                format!("relation attribute {attr_qualname} not found in SDL configuration"),
+            ))?;
+
+        let attr_type_num = match attr_type.as_str() {
+            "string" => 1,
+            "time" | "instant" | "timestamp" | "datetime" => 2,
+            "int" | "integer" => 3,
+            "long" => 4,
+            "double" | "float" => 5,
+            "bool" | "boolean" => 6,
+            "data" | "bytes" | "blob" => 7,
+            _ => 1,
+        };
+
+        let label_attr = if let Some(&(label_id, _)) = self.attr_ids.get(&IptoAttributeName::from("rdfs:label")) {
+            Some(serde_json::json!({
+                "attrid": label_id,
+                "attrtype": 1,
+                "value": [format!("{attr_qualname} → {value}")],
+            }))
+        } else {
+            None
+        };
+
+        let mut attributes: Vec<Value> = vec![serde_json::json!({
+            "attrid": attr_id,
+            "attrtype": attr_type_num,
+            "value": [value.to_string()],
+        })];
+        if let Some(label) = label_attr {
+            attributes.push(label);
+        }
+
+        Ok(serde_json::json!({
+            "tenantid": self.tenant_id,
+            "corrid": corrid.to_string(),
+            "status": 30,
+            "attributes": attributes,
+        }))
     }
 }
 

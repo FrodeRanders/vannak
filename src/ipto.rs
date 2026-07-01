@@ -151,6 +151,17 @@ impl IptoWritePayload {
             }
         }
 
+        // Sentinel PROV-O relation attributes from event identity fields.
+        // These carry structured identity data as regular attributes so the
+        // writer can detect them and emit relation units without changing the
+        // binary codec.
+        if let Some(ref activity_id) = event.activity_id() {
+            attributes.insert(
+                IptoAttributeName::from("vannak:relation:wasGeneratedBy"),
+                MetadataValue::string(activity_id.as_str()),
+            );
+        }
+
         Self {
             target: target.clone(),
             shard_id: event.data_individual_shard_id(),
@@ -483,7 +494,7 @@ pub enum MetadataOutboxDeliveryResult {
 
 pub fn deliver_next_pending(
     outbox: &mut MetadataOutbox,
-    writer: &mut impl IptoWriter,
+    writer: &mut (impl IptoWriter + ?Sized),
 ) -> MetadataOutboxDeliveryResult {
     let Some(payload) = outbox.next_pending().map(|entry| entry.payload().clone()) else {
         return MetadataOutboxDeliveryResult::NoPending;
@@ -513,7 +524,7 @@ pub fn deliver_next_pending(
 pub fn deliver_next_pending_for_target(
     outbox: &mut MetadataOutbox,
     target: &IptoInstanceId,
-    writer: &mut impl IptoWriter,
+    writer: &mut (impl IptoWriter + ?Sized),
 ) -> MetadataOutboxDeliveryResult {
     let Some(payload) = outbox
         .next_pending_for_target(target)
@@ -559,7 +570,7 @@ impl MetadataOutboxDrainSummary {
 
 pub fn drain_pending_outbox(
     outbox: &mut MetadataOutbox,
-    writer: &mut impl IptoWriter,
+    writer: &mut (impl IptoWriter + ?Sized),
     max_attempts: usize,
 ) -> MetadataOutboxDrainSummary {
     let mut summary = MetadataOutboxDrainSummary {
@@ -593,7 +604,7 @@ pub fn drain_pending_outbox(
 pub fn drain_pending_outbox_for_target(
     outbox: &mut MetadataOutbox,
     target: &IptoInstanceId,
-    writer: &mut impl IptoWriter,
+    writer: &mut (impl IptoWriter + ?Sized),
     max_attempts: usize,
 ) -> MetadataOutboxDrainSummary {
     let mut summary = MetadataOutboxDrainSummary {
@@ -858,7 +869,7 @@ pub fn rebalance_shard_range_to(
     segment_path: impl AsRef<Path>,
     start: DataIndividualShardId,
     end: DataIndividualShardId,
-    writer: &mut impl IptoWriter,
+    writer: &mut (impl IptoWriter + ?Sized),
     max_attempts: usize,
 ) -> Result<MetadataOutboxRebalanceSummary, MetadataOutboxStorageError> {
     let mut pending = replay_metadata_outbox_segment_for_shard_range(segment_path, start, end)?;

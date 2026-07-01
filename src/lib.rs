@@ -24,6 +24,8 @@
 
 pub mod cluster;
 pub mod data;
+#[cfg(feature = "daemon")]
+pub mod daemon;
 pub mod durga;
 pub mod index;
 pub mod ingest;
@@ -101,6 +103,11 @@ pub use query::{
     TimeRangeQuery,
 };
 pub use observability::{DurgaCompatibilitySnapshot, HotIndexSnapshot};
+#[cfg(feature = "daemon")]
+pub use daemon::{
+    BackgroundWriterConfig, BackgroundWriterSnapshot, Daemon, DaemonConfig, DaemonSnapshot,
+    SegmentDiscoveryResult, discover_segments, run_background_writer, start_health_server,
+};
 pub use runtime::{
     BoundedIngestRuntime, BoundedIngestRuntimeSnapshot, IngestDrainSummary, IngestQueueSnapshot,
     LogicalShardId, QueuedIngestOutcome, RuntimeError, ShardIngestOutcome, ShardLocalRuntime,

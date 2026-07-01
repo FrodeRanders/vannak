@@ -1,0 +1,159 @@
+# Vannak full-stack demo: PostgreSQL (Ipto) + Redpanda (Kafka) + 3-node
+# Vannak cluster with daemon service plane.
+#
+# Usage:
+#   docker compose -f docker-compose.full.yml up --build
+#
+# Then in another terminal:
+#   # Check cluster health
+#   curl http://127.0.0.1:19090/health | jq
+#
+#   # Produce a test Durga JSON event to Kafka
+#   echo '{"processInstanceId":"demo-1","processId":"demo-pipeline","status":"STARTED","eventType":"ACTIVITY_ENTERED","timestamp":"2026-07-01T10:00:00Z"}' | \
+#     docker exec -i vannak-full-kafka rpk topic produce process-events -f '%v'
+#
+#   # Query the hot index for pipeline instances
+#   curl -s -X POST http://127.0.0.1:19090/query \
+#     -H 'Content-Type: application/json' \
+#     -d '{"type":"Pipeline","pipeline_id":"demo-pipeline","limit":10}' | jq
+#
+#   # Tear down
+#   docker compose -f docker-compose.full.yml down -v
+
+services:
+  # -----------------------------------------------------------------------
+  # PostgreSQL with Ipto schema (metadata backend)
+  # -----------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: vannak-full-pg
+    environment:
+      POSTGRES_USER: repo
+      POSTGRES_PASSWORD: repo
+      POSTGRES_DB: repo
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/schema.sql:/docker-entrypoint-initdb.d/00_schema.sql:ro
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/procedures.sql:/docker-entrypoint-initdb.d/01_procedures.sql:ro
+      - ${IPTO_SQL_DIR:-../ipto/shared/db/postgresql}/boot.sql:/docker-entrypoint-initdb.d/02_boot.sql:ro
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repo -d repo"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # -----------------------------------------------------------------------
+  # Redpanda (Kafka-compatible message broker)
+  # -----------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.3.6
+    container_name: vannak-full-kafka
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "0"
+      - --check=false
+      - --kafka-addr
+      - PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"
+    restart: "no"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info --brokers=localhost:9092 >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+
+  # -----------------------------------------------------------------------
+  # Vannak node 1 (with Kafka consumer)
+  # -----------------------------------------------------------------------
+  vannak-1:
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
+    container_name: vannak-full-1
+    volumes:
+      - vannak-1-data:/data
+    ports:
+      - "19090:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command:
+      --raft 0.0.0.0 10081 vannak-1 /data vannak-2@vannak-2:10081 vannak-3@vannak-3:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-1
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  # -----------------------------------------------------------------------
+  # Vannak node 2
+  # -----------------------------------------------------------------------
+  vannak-2:
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
+    container_name: vannak-full-2
+    volumes:
+      - vannak-2-data:/data
+    ports:
+      - "19091:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command:
+      --raft 0.0.0.0 10081 vannak-2 /data vannak-1@vannak-1:10081 vannak-3@vannak-3:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-2
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
+
+  # -----------------------------------------------------------------------
+  # Vannak node 3
+  # -----------------------------------------------------------------------
+  vannak-3:
+    build:
+      context: ..
+      dockerfile: vannak/Dockerfile
+    container_name: vannak-full-3
+    volumes:
+      - vannak-3-data:/data
+    ports:
+      - "19093:9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+    command:
+      --raft 0.0.0.0 10081 vannak-3 /data vannak-1@vannak-1:10081 vannak-2@vannak-2:10081
+      --health 0.0.0.0:9090
+      --outbox /data/outbox.seg outbox vannak-3
+      --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
+
+volumes:
+  pg-data:
+  vannak-1-data:
+  vannak-2-data:
+  vannak-3-data:

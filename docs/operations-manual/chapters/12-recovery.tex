@@ -130,6 +130,18 @@ This is safe because all durable state is already on disk: outbox segments are
 synced on enqueue, sealed segment manifests are recorded through \raft{}, and
 the \raft{} log and state are file-backed. A restarted node recovers from these.
 
+\subsection{Segment Discovery at Startup}
+
+When the \texttt{vannak} supervisor binary starts, it scans the segment
+directory for \texttt{.seg} files using \texttt{discover\_segments}. Each file
+is validated against the Vannak segment magic (\texttt{VANNAK01}). Valid
+segments are reported with their manifests (record count, byte length,
+checksum); files failing magic validation are listed as \texttt{invalid}
+so the operator can investigate. If the directory does not exist or is empty,
+discovery returns silently. This provides an automatic inventory of durable
+segments at daemon startup, enabling background delivery resumption and
+recovery planning before the first event is ingested.
+
 \subsection{Degraded Mode}
 
 \vannak{} degrades rather than failing hard in several situations:

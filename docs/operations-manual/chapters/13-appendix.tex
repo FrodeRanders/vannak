@@ -50,10 +50,11 @@ events, feed Sitas workers, pause Kafka partitions when Sitas mailboxes are
 full, resume them after admission, record assignment/revocation callbacks in
 owned snapshots, and commit offsets after admission. If a partition is revoked
 while it still has an uncommitted pending record, the consumer returns an
-explicit error instead of committing the offset. Live Durga schema verification,
-richer operational supervision, and live Durga compatibility coverage remain
-planned.
-\\
+explicit error instead of committing the offset. Record throughput is tracked
+through \texttt{total\_polled} and \texttt{total\_accepted} counters in
+\texttt{KafkaProcessConsumerSnapshot}. Live Durga schema verification via
+\texttt{DurgaCompatibilityState} tracks unknown statuses and event types across
+the consumer session. \\
 
 Kafka broker smoke test & Test/runbook &
 \texttt{docker-compose.kafka.yml} starts a single Redpanda broker.
@@ -113,7 +114,13 @@ Local query fanout & Implemented &
 \texttt{ShardLocalRuntime::pipeline\_instances} and
 \texttt{ShardLocalRuntime::impact}, plus status and time-range query methods,
 scatter across local shards and merge owned results with global limits.
-Cross-node cluster query fanout is still planned. \\
+Cross-node cluster query fanout & Implemented &
+\texttt{daemon.rs} provides \texttt{POST /query} and \texttt{fanout\_*}
+(\texttt{fanout\_process\_instance\_query},
+\texttt{fanout\_pipeline\_query},
+\texttt{fanout\_process\_status\_query}) for scatter/gather across peer
+health/query endpoints. The \texttt{ClusterQueryResult} merges results
+with per-peer failure reporting. \\
 
 Data-individual provenance model & Implemented &
 \texttt{DataIndividualMetadataEvent}, \texttt{PassiveMetadata},
@@ -166,14 +173,21 @@ a checkpoint offset and returns \texttt{MetadataOutboxReplaySummary};
 \texttt{VannakService::replay\_metadata\_outbox\_after} exposes the same local
 recovery helper. \\
 
-Shard-range rebalance replay & Implemented primitive &
+Shard-range rebalance replay & Implemented &
 \texttt{replay\_metadata\_outbox\_segment\_for\_shard\_range} and
-\texttt{rebalance\_shard\_range\_to} exist and are tested. Automatic
-placement-change orchestration is planned. \\
+\texttt{rebalance\_shard\_range\_to} exist and are tested.
+\texttt{daemon.rs} adds \texttt{detect\_placement\_change} to compare
+consecutive placement maps, \texttt{rebalance\_after\_placement\_change} to
+replay and deliver moved shard ranges, and
+\texttt{run\_rebalance\_monitor} for periodic automated rebalancing. \\
 
 Ipto writer adapter & Feature-gated &
 \texttt{IptoRepoWriter} is compiled with \texttt{ipto-writer}; it configures
-the built-in PROV-O SDL and writes units through \texttt{ipto\_rust}. \\
+the built-in PROV-O SDL and writes units through \texttt{ipto\_rust}. PROV-O
+internal relations (\texttt{wasGeneratedBy}, \texttt{used},
+\texttt{wasDerivedFrom}) are emitted as separate relation units via sentinel
+\texttt{vannak:relation:*} attributes in \texttt{IptoWritePayload} and
+detected by the writer for idempotent relation-unit creation. \\
 
 PostgreSQL-backed Ipto integration test & Test/runbook &
 \texttt{tests/vannak\_integration.rs} runs only when
@@ -194,28 +208,73 @@ discovery and file-backed \raft{} storage. It does not ingest data events. \\
 Target-aware writer lease enforcement & Implemented service boundary &
 \texttt{WriterLease} is stored and epoch-validated in control state.
 \texttt{VannakService::drain\_metadata\_for\_target\_if\_lease\_held} checks the
-lease holder before draining only that target. Background lease renewal and
-writer task scheduling remain future work. \\
+lease holder before draining only that target. Background writer task scheduling
+is implemented through \texttt{daemon.rs} (\texttt{run\_background\_writer});
+background lease renewal is part of the drain loop. \\
 
 Local metadata outbox crash recovery & Implemented service boundary &
 \texttt{SegmentBackedMetadataOutbox::recover\_after} replays records after a
 checkpoint and reopens the validated segment for append.
 \texttt{VannakService::recover\_after} rebuilds the single-node service around
-that recovered outbox. Automatic discovery of owned segments and background
-delivery resumption at daemon startup remain future work. \\
+that recovered outbox.
+\texttt{discover\_segments} in \texttt{daemon.rs} provides automatic discovery
+of owned \texttt{.seg} files for background delivery resumption at daemon
+startup; \texttt{Daemon} orchestrates segment discovery, recovery, background
+writer scheduling, and the HTTP health endpoint. \\
 
 Owned observability snapshots & Implemented primitive &
 \texttt{HotIndexSnapshot}, \texttt{MetadataOutboxSnapshot},
 \texttt{SegmentBackedMetadataOutboxSnapshot}, replay summaries, and rebalance
-summaries are owned values. No metrics or HTTP health endpoint exists. \\
+summaries are owned values.
+\texttt{daemon.rs} provides an HTTP health endpoint (\texttt{start\_health\_server},
+\texttt{Daemon::serve\_health}) exposing JSON snapshots of the hot index,
+metadata outbox, provenance index, placement epoch, process-event journal, and
+background writer state at \texttt{/health}. \\
 
 Load generator & Test/runbook &
 \texttt{vannak-load} simulates process and metadata events in-process; with
 \texttt{ipto-writer} it can write through \ipto{}, but it is not the production
 service loop. \\
+
+Daemon runtime (health, ingest, query, background writer, segment discovery) & Feature-gated &
+Compiled with \texttt{daemon}. \texttt{Daemon} wraps \texttt{VannakService}
+for concurrent HTTP and background access. \texttt{start\_health\_server} serves
+JSON snapshots via \texttt{/health}, accepts process events via
+\texttt{POST /ingest}, and answers typed queries via \texttt{POST /query}.
+\texttt{run\_background\_writer} runs a timer-driven outbox drain loop with
+lease checks, writing through an \texttt{IptoWriter}. \texttt{discover\_segments}
+scans a directory for \texttt{.seg} files, validates magic, and returns
+manifests. \\
 \end{longtable}
 
 \subsection{CLI Reference}
+
+\subsubsection{\texttt{vannak} (supervisor daemon)}
+
+The \texttt{vannak} binary (built with \texttt{node} + \texttt{daemon}) starts
+the Raft control plane, the daemon service plane, and optionally the Kafka
+consumer in a single supervised process.
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{ll}
+\hline
+Option & Effect \\
+\hline
+\shellcmd{--raft <host> <port> <peer-id> <data-dir> [peers...]} & start Raft control-plane node \\
+\shellcmd{--srv <service> <host> <port> <peer-id> <data-dir>} & discover Raft peers via DNS SRV \\
+\shellcmd{--kafka <brokers> <group> <shards> <cap> <topic>...} & start Kafka consumer (requires \texttt{kafka-client}) \\
+\shellcmd{--health <bind-addr>} & health/query HTTP server bind address (default \texttt{127.0.0.1:9090}) \\
+\shellcmd{--outbox <path> <seg-id> <node-id>} & metadata outbox segment path and identity \\
+\shellcmd{--journal <path>} & process-event journal segment path \\
+\shellcmd{--writer-interval <secs>} & background writer drain interval (default 5) \\
+\shellcmd{--placement <epoch> <target> <vnodes> ...} & Ipto placement map \\
+\hline
+\end{tabular}
+\caption{\texttt{vannak} supervisor daemon options.}
+\end{table}
+
+\subsubsection{\texttt{vannak-node} (standalone Raft node)}
 
 The \texttt{vannak-node} binary (built with the \texttt{node} feature) accepts
 the following forms:

@@ -117,10 +117,41 @@ vannak-node probe localhost 10081
 
 \subsection{Health Endpoints}
 
-The node exposes its \graft{} transport on port 10081, which serves as the
-reachability endpoint probed above. There is no separate HTTP health port; the
-transport listener and the \texttt{probe} subcommand together provide the
-liveness and summary signals.
+The \texttt{daemon} feature provides an HTTP health and query server via
+\texttt{TcpListener} (no external HTTP dependency). It binds to a configured
+address (default \texttt{127.0.0.1:9090}) and exposes two endpoints:
+
+\begin{description}
+\item[\texttt{GET /health}] Returns a JSON snapshot of the full daemon state:
+  \texttt{uptime\_secs}, \texttt{hot\_index} (event\_count,
+  process\_instance\_count, pipeline\_count, duplicate\_events,
+  rejected\_events), \texttt{outbox} (total, pending, acknowledged, failed),
+  \texttt{provenance} (metadata\_event\_count), \texttt{placement\_epoch},
+  optional \texttt{process\_event\_journal} manifest, and optional
+  \texttt{background\_writer} (cycles, total\_acknowledged, total\_failed).
+
+\item[\texttt{POST /query}] Accepts a JSON query body and returns a JSON
+  \texttt{QueryResult}. Supported query types:
+  \begin{itemize}
+  \item \texttt{"type":"ProcessInstance","process\_instance\_id":"<id>"}
+  \item \texttt{"type":"Pipeline","pipeline\_id":"<id>","limit":<n>}
+  \item \texttt{"type":"ProcessStatus","status":"<Active|Completed|Failed|Cancelled>","limit":<n>}
+  \end{itemize}
+  Results are returned as \texttt{"type":"ProcessInstances","instance":[...]}.
+\end{description}
+
+The \texttt{vannak} supervisor binary starts both the Raft transport listener
+(on the configured Raft port) and the daemon health server (on
+\texttt{--health <bind-addr>}) in the same process. The health endpoint is
+also used as the query fanout target for cluster-level scatter/gather queries:
+\texttt{fanout\_process\_instance\_query}, \texttt{fanout\_pipeline\_query},
+and \texttt{fanout\_process\_status\_query} send \texttt{POST /query} to each
+configured peer and merge the results.
+
+The \graft{} transport listener on port 10081 remains the Raft inter-node
+communication channel and is probed via the \texttt{probe} subcommand.
+There is no separate HTTP health port for that listener; daemon-level
+observability is served from the daemon HTTP endpoint.
 
 \subsection{Container Health Checks}
 

@@ -44,6 +44,7 @@ rdkafka = { version = "0.36", optional = true }
 
 [features]
 default = []
+daemon = []
 ipto-writer = ["dep:ipto", "dep:serde_json", "dep:uuid"]
 raft = ["dep:gautelis-graft-core", "dep:serde", "dep:serde_json"]
 node = ["raft", "dep:gautelis-graft-runtime", "dep:gautelis-graft-storage", "dep:gautelis-graft-transport", "dep:tokio", "dep:parking_lot", "dep:gautelis-graft-proto", "dep:prost", "dep:bytes", "dep:tracing-subscriber"]
@@ -63,8 +64,11 @@ name = "vannak-node"
 required-features = ["node"]
 
 [[bin]]
+name = "vannak"
+required-features = ["node", "daemon"]
+
+[[bin]]
 name = "vannak-load"
-required-features = []
 
 [[bin]]
 name = "vannak-kafka-ingest"

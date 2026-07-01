@@ -147,10 +147,15 @@ Module & Responsibility \\
 \subsection{Current Status and Maturity}
 
 This repository contains the dependency-free Rust core types and reducers plus
-optional adapters behind feature flags. The core is implemented and tested. It
-includes a standalone Kafka runner that can feed \sitas{} workers, but the node
-binary does not yet supervise that runner; those attach at the documented module
-boundaries.
+optional adapters behind feature flags. The core is implemented and tested.
+
+The \texttt{vannak} binary (built with \texttt{node} + \texttt{daemon}) runs
+the Raft control plane, the daemon service plane (health/query HTTP server,
+background writer, segment discovery), and optionally the Kafka consumer in a
+single supervised process. It replaces the earlier split between
+\texttt{vannak-node} and \texttt{vannak-kafka-ingest} for deployments that
+prefer co-located supervision. The standalone binaries remain available for
+deployments that separate the control and data planes. \\
 
 Implemented today: the \durga{}-compatible process-event mirror, the
 process-state reducer, typed metadata references, the single-node hot index,
@@ -171,8 +176,13 @@ boundary (\texttt{VannakService}) that wires process ingest, durable process
 event journaling, durable metadata capture, target-aware outbox draining,
 writer-lease checks, checkpoint lookup, recovery replay, and owned snapshots, a
 concrete \ipto{} writer
-(\texttt{IptoRepoWriter}), the PROV-O SDL schema, and a \graft{} state machine
-adapter (\texttt{ClusterStateMachine}).
+(\texttt{IptoRepoWriter}) with PROV-O relation-unit emission
+(\texttt{wasGeneratedBy}, \texttt{used}, \texttt{wasDerivedFrom}), a
+\graft{} state machine adapter (\texttt{ClusterStateMachine}), a daemon
+runtime (\texttt{daemon.rs}) with segment discovery, background writer
+scheduling, HTTP health/query endpoint, cluster query fanout, and automated
+placement-change rebalancing, and the \texttt{vannak} supervisor binary that
+co-locates Raft, Kafka, and the daemon service plane in one process.
 
 \subsection{Feature Flags}
 
@@ -189,6 +199,9 @@ Feature & Effect \\
 \texttt{ipto-writer} & enables \texttt{ipto\_adapter} backed by \texttt{ipto\_rust} \\
 \texttt{raft} & enables \texttt{raft\_sm} with the \graft{} state machine \\
 \texttt{node} & enables the \texttt{vannak-node} binary (implies \texttt{raft}) \\
+\texttt{daemon} & daemon runtime: health/query HTTP, background writer, segment discovery \\
+\texttt{sitas-runtime} & \texttt{SitasShardRuntime} adapter, \texttt{kafka\_ingest} boundary \\
+\texttt{kafka-client} & \texttt{vannak-kafka-ingest} binary (implies \texttt{sitas-runtime}) \\
 \hline
 \end{tabular}
 \caption{\vannak{} Cargo feature flags.}

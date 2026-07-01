@@ -230,6 +230,8 @@ pub struct KafkaProcessConsumer {
     paused: BTreeSet<KafkaTopicPartition>,
     rebalance_state: Arc<Mutex<KafkaRebalanceState>>,
     durga_compat: DurgaCompatibilityState,
+    total_polled: u64,
+    total_accepted: u64,
 }
 
 impl KafkaProcessConsumer {
@@ -265,6 +267,8 @@ impl KafkaProcessConsumer {
             paused: BTreeSet::new(),
             rebalance_state,
             durga_compat: DurgaCompatibilityState::default(),
+            total_polled: 0,
+            total_accepted: 0,
         })
     }
 
@@ -280,6 +284,8 @@ impl KafkaProcessConsumer {
             paused_partitions: self.paused.iter().cloned().collect(),
             rebalance: lock_rebalance_state(&self.rebalance_state).snapshot(),
             durga_compat: self.durga_compat.snapshot(),
+            total_polled: self.total_polled,
+            total_accepted: self.total_accepted,
         }
     }
 
@@ -300,6 +306,7 @@ impl KafkaProcessConsumer {
         let Some(result) = self.consumer.poll(self.config.poll_timeout) else {
             return Ok(None);
         };
+        self.total_polled += 1;
         let message = result?;
         let payload = message.payload().ok_or(KafkaClientError::MissingPayload)?;
         let event = self
@@ -355,6 +362,7 @@ impl KafkaProcessConsumer {
 
         self.resume_partition(&outcome.topic_partition)?;
         self.commit_offset(&outcome.topic_partition, outcome.next_commit_offset)?;
+        self.total_accepted += 1;
         Ok(Some(outcome))
     }
 
@@ -518,6 +526,10 @@ pub struct KafkaProcessConsumerSnapshot {
     pub rebalance: KafkaRebalanceSnapshot,
     /// Live Durga schema compatibility tracking.
     pub durga_compat: DurgaCompatibilitySnapshot,
+    /// Total records polled from Kafka.
+    pub total_polled: u64,
+    /// Total records accepted after journal + Sitas admission.
+    pub total_accepted: u64,
 }
 
 /// Owned snapshot of Kafka rebalance callback state.
