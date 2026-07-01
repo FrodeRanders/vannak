@@ -476,6 +476,96 @@ dependencies = [
 ]
 
 [[package]]
+name = "gautelis-graft-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "gautelis-graft-proto",
+ "indexmap",
+ "parking_lot",
+ "prost",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gautelis-graft-proto"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "prost-build",
+]
+
+[[package]]
+name = "gautelis-graft-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "gautelis-graft-core",
+ "gautelis-graft-proto",
+ "gautelis-graft-storage",
+ "gautelis-graft-telemetry",
+ "gautelis-graft-transport",
+ "parking_lot",
+ "prost",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gautelis-graft-storage"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "gautelis-graft-core",
+ "gautelis-graft-proto",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gautelis-graft-telemetry"
+version = "0.1.0"
+dependencies = [
+ "gautelis-graft-core",
+ "parking_lot",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "gautelis-graft-transport"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "dashmap",
+ "gautelis-graft-core",
+ "gautelis-graft-proto",
+ "parking_lot",
+ "prost",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -496,96 +586,6 @@ dependencies = [
  "libc",
  "r-efi",
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "graft-core"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "graft-proto",
- "indexmap",
- "parking_lot",
- "prost",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "graft-proto"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "prost",
- "prost-build",
-]
-
-[[package]]
-name = "graft-runtime"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "graft-core",
- "graft-proto",
- "graft-storage",
- "graft-telemetry",
- "graft-transport",
- "parking_lot",
- "prost",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "graft-storage"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "graft-core",
- "graft-proto",
- "prost",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "graft-telemetry"
-version = "0.1.0"
-dependencies = [
- "graft-core",
- "parking_lot",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "graft-transport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "dashmap",
- "graft-core",
- "graft-proto",
- "parking_lot",
- "prost",
- "thiserror",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -787,7 +787,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ipto_rust"
+name = "ipto"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -1421,9 +1421,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-pki-types"
-version = "1.14.1"
+version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30a7197ae7eb376e574fe940d068c30fe0462554a3ddbe4eca7838e049c937a9"
+checksum = "764899a24af3980067ee14bc143654f297b22eaebfe3c7b6b211920a5a59b046"
 dependencies = [
  "zeroize",
 ]
@@ -1663,9 +1663,9 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.51"
+version = "0.3.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85c17d80feb7334b40c484e45ed1a5273dfd8bfda537c3be2e74a06a6686f327"
+checksum = "18dfaaeddcb932337b5e7866ee7d0ce9b76d2fd092997146f187ec09b4558a50"
 dependencies = [
  "deranged",
  "num-conv",
@@ -1683,9 +1683,9 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "time-macros"
-version = "0.2.30"
+version = "0.2.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcef1a61bdb119096e153208ec5cbec23944ce8bca13be5c7f60c634f7403935"
+checksum = "c431b87111666e491a90baa837f914fb45cd5dc3c268591b0220ff5057f2085f"
 dependencies = [
  "num-conv",
  "time-core",
@@ -1998,12 +1998,12 @@ name = "vannak"
 version = "0.1.0"
 dependencies = [
  "bytes",
- "graft-core",
- "graft-proto",
- "graft-runtime",
- "graft-storage",
- "graft-transport",
- "ipto_rust",
+ "gautelis-graft-core",
+ "gautelis-graft-proto",
+ "gautelis-graft-runtime",
+ "gautelis-graft-storage",
+ "gautelis-graft-transport",
+ "ipto",
  "parking_lot",
  "prost",
  "rdkafka",
