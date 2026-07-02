@@ -25,21 +25,21 @@ name = "vannak"
 path = "src/lib.rs"
 
 [dependencies]
-ipto = { path = "../ipto/implementations/rust", optional = true, default-features = false }
+ipto = { version = "0.1.0", optional = true, default-features = false }
 serde_json = { version = "1", optional = true }
 uuid = { version = "1", features = ["v7"], optional = true }
-gautelis-graft-core = { path = "../raft/graft-rust/graft-core", optional = true }
+gautelis-graft-core = { version = "0.1.0", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
-gautelis-graft-runtime = { path = "../raft/graft-rust/graft-runtime", optional = true }
-gautelis-graft-storage = { path = "../raft/graft-rust/graft-storage", optional = true }
-gautelis-graft-transport = { path = "../raft/graft-rust/graft-transport", optional = true }
+gautelis-graft-runtime = { version = "0.1.0", optional = true }
+gautelis-graft-storage = { version = "0.1.0", optional = true }
+gautelis-graft-transport = { version = "0.1.0", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 parking_lot = { version = "0.12", optional = true }
-gautelis-graft-proto = { path = "../raft/graft-rust/graft-proto", optional = true }
+gautelis-graft-proto = { version = "0.1.0", optional = true }
 prost = { version = "0.14", optional = true }
 bytes = { version = "1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
-sitas = { path = "../sitas", optional = true }
+sitas = { version = "0.1.0", optional = true }
 rdkafka = { version = "0.36", optional = true }
 
 [features]

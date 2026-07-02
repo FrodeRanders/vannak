@@ -1,0 +1,12 @@
+# Local development overrides.
+# Uncomment and adjust paths when developing against local copies of these crates.
+# Leave commented out for CI / crates.io-only builds.
+
+# [patch.crates-io]
+# sitas = { path = "../sitas" }
+# ipto = { path = "../ipto/implementations/rust" }
+# gautelis-graft-core = { path = "../raft/graft-rust/graft-core" }
+# gautelis-graft-runtime = { path = "../raft/graft-rust/graft-runtime" }
+# gautelis-graft-storage = { path = "../raft/graft-rust/graft-storage" }
+# gautelis-graft-transport = { path = "../raft/graft-rust/graft-transport" }
+# gautelis-graft-proto = { path = "../raft/graft-rust/graft-proto" }

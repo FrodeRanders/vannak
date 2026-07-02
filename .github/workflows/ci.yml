@@ -23,18 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Checkout sibling repos
-        run: |
-          git clone --depth 1 https://github.com/FrodeRanders/ipto.git ../ipto
-          git clone --depth 1 https://github.com/FrodeRanders/raft.git ../raft
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
           cache-workspaces: |
             . -> target
-            ../ipto/implementations/rust -> ../ipto/implementations/rust/target
-            ../raft/graft-rust -> ../raft/graft-rust/target
 
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -68,16 +61,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Checkout sibling repos
-        run: |
-          git clone --depth 1 https://github.com/FrodeRanders/ipto.git ../ipto
-          git clone --depth 1 https://github.com/FrodeRanders/raft.git ../raft
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-workspaces: |
             . -> target
-            ../ipto/implementations/rust -> ../ipto/implementations/rust/target
 
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -93,16 +80,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Checkout sibling repos
-        run: |
-          git clone --depth 1 https://github.com/FrodeRanders/ipto.git ../ipto
-          git clone --depth 1 https://github.com/FrodeRanders/raft.git ../raft
-
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache-workspaces: |
             . -> target
-            ../raft/graft-rust -> ../raft/graft-rust/target
 
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler

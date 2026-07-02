@@ -478,6 +478,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-core"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72936a99bf7a35d29702fcdc6ea1e3d4cc93d03c824ba1ed67c0b77f078b334e"
 dependencies = [
  "bytes",
  "gautelis-graft-proto",
@@ -495,6 +497,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-proto"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fec2f883bfc2e0d067263d820178f361c62d2a5f9e05f6c305cde2a6bafb6d77"
 dependencies = [
  "bytes",
  "prost",
@@ -504,6 +508,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-runtime"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc8594c118de07d25e27745d299301a7fcf009df0682a176c9e48205664f1994"
 dependencies = [
  "anyhow",
  "bytes",
@@ -526,6 +532,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-storage"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a9cbccd80ca30c44c2c71ab10fb4ff8d8de5a9c30ecb79ead1bec9052e6acc2"
 dependencies = [
  "bytes",
  "gautelis-graft-core",
@@ -542,6 +550,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-telemetry"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f4780164263b03c01a13af30ad9828e7139443ac52e64b3b49ac3ee4c9e940"
 dependencies = [
  "gautelis-graft-core",
  "parking_lot",
@@ -553,6 +563,8 @@ dependencies = [
 [[package]]
 name = "gautelis-graft-transport"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6413ac4466fb9720fe2cc6a07d4d0f109ac8ec2d960a984251e6b8f46cf5115c"
 dependencies = [
  "bytes",
  "dashmap",
@@ -789,6 +801,8 @@ dependencies = [
 [[package]]
 name = "ipto"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "034fea7eba1acd24ba95754907bbf9bc03d29440180483e5c2dc96cc063d9c59"
 dependencies = [
  "base64",
  "chrono",
@@ -846,9 +860,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libredox"
-version = "0.1.17"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
+checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
 ]
@@ -1124,7 +1138,7 @@ dependencies = [
  "hmac",
  "md-5",
  "memchr",
- "rand 0.10.1",
+ "rand 0.10.2",
  "sha2",
  "stringprep",
 ]
@@ -1275,9 +1289,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",
@@ -1545,6 +1559,8 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 [[package]]
 name = "sitas"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2f85fb2e6211481793b14b368312b8e6bc7ad90230350989b4eeca41f03350"
 
 [[package]]
 name = "slab"
@@ -1763,7 +1779,7 @@ dependencies = [
  "pin-project-lite",
  "postgres-protocol",
  "postgres-types",
- "rand 0.10.1",
+ "rand 0.10.2",
  "socket2",
  "tokio",
  "tokio-util",
