@@ -344,17 +344,3 @@ Near-term growth order:
 6. Add Raft-backed placement maps, checkpoints, and segment manifests.
 7. Add recovery and ownership-transfer semantics.
 
-## Non-Goals
-
-Vannak is not initially:
-
-- a replacement workflow engine for Durga;
-- a replacement metadata catalog for Ipto;
-- a distributed SQL engine;
-- a generic full-text log search product;
-- a consensus-replicated event firehose;
-- a storage system for arbitrary data payloads;
-- a browser UI before the ingest/query/control APIs are coherent.
-
-Vannak's intended role is narrower: a process-aware, metadata-aware operational
-index and durable provenance delivery layer for data-pipeline systems.
