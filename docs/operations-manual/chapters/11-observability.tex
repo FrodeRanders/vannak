@@ -138,6 +138,15 @@ address (default \texttt{127.0.0.1:9090}) and exposes two endpoints:
   \item \texttt{"type":"ProcessStatus","status":"<Active|Completed|Failed|Cancelled>","limit":<n>}
   \end{itemize}
   Results are returned as \texttt{"type":"ProcessInstances","instance":[...]}.
+
+\item[\texttt{POST /ingest}] Accepts a minimal JSON process event with required
+  fields \texttt{process\_instance\_id}, \texttt{pipeline\_id}, and
+  \texttt{kind}. Optional fields include \texttt{event\_id},
+  \texttt{timestamp}, \texttt{tenant\_id}, \texttt{environment\_id}, and
+  \texttt{activity\_id}. The daemon parses request bodies with
+  \texttt{serde\_json}; malformed JSON, missing required fields, unknown event
+  kinds, and unknown process statuses are rejected with \texttt{400 Bad Request}
+  instead of being silently defaulted.
 \end{description}
 
 The \texttt{vannak} supervisor binary starts both the Raft transport listener

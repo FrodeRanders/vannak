@@ -113,7 +113,7 @@ through \texttt{DataIndividualMetadataQuery}, \texttt{ProcessMetadataQuery}, and
 Local query fanout & Implemented &
 \texttt{ShardLocalRuntime::pipeline\_instances} and
 \texttt{ShardLocalRuntime::impact}, plus status and time-range query methods,
-scatter across local shards and merge owned results with global limits.
+scatter across local shards and merge owned results with global limits. \\
 Cross-node cluster query fanout & Implemented &
 \texttt{daemon.rs} provides \texttt{POST /query} and \texttt{fanout\_*}
 (\texttt{fanout\_process\_instance\_query},
@@ -253,7 +253,9 @@ manifests. \\
 
 The \texttt{vannak} binary (built with \texttt{node} + \texttt{daemon}) starts
 the Raft control plane, the daemon service plane, and optionally the Kafka
-consumer in a single supervised process.
+consumer in a single supervised process. Add \texttt{ipto-writer} and
+\shellcmd{--with-ipto} when the process should also run the concrete
+PostgreSQL-backed \ipto{} writer.
 
 \begin{table}[htbp]
 \centering
@@ -268,6 +270,8 @@ Option & Effect \\
 \shellcmd{--outbox <path> <seg-id> <node-id>} & metadata outbox segment path and identity \\
 \shellcmd{--journal <path>} & process-event journal segment path \\
 \shellcmd{--writer-interval <secs>} & background writer drain interval (default 5) \\
+\shellcmd{--with-ipto} & start \texttt{IptoRepoWriter} background drains (requires \texttt{ipto-writer}) \\
+\shellcmd{--ipto-tenant <id>} & \ipto{} tenant id for \shellcmd{--with-ipto} (default 1) \\
 \shellcmd{--placement <epoch> <target> <vnodes> ...} & Ipto placement map \\
 \hline
 \end{tabular}

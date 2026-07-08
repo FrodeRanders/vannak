@@ -120,6 +120,8 @@ Implemented so far:
   returns an owned replay summary;
 - optional `ipto-writer` feature flag with an `IptoWriter` implementation
   (`IptoRepoWriter`) backed by `ipto_rust::RepoService` (PostgreSQL);
+- optional `daemon` feature flag with structured JSON parsing for the health,
+  ingest, and query service;
 - deterministic correlation-id (UUID v7) generation from `IdempotencyKey` for
   idempotent Ipto writes;
 - built-in PROV-O SDL schema for provenance attribute and template registration;
@@ -228,9 +230,36 @@ pending delivery state from the segment. Process events also have a typed
 replays them into owned events, and can reopen validated segments for append.
 `VannakService` wires this into an opt-in durable process-ingest path and a
 single-node metadata capture path, and can drain a specific Ipto target only
-when the caller holds the target's writer lease. Background writer tasks,
-checkpoint publication, and automatic discovery of owned segments at startup are
-still future work.
+when the caller holds the target's writer lease. The `vannak` supervisor
+discovers existing segment files at startup, recovers existing metadata outbox
+and process-event journal segments for append, initializes its local control
+state from the same placement map used by the service, and can start a
+PostgreSQL-backed background Ipto writer with `--with-ipto` when built with
+`ipto-writer`. Checkpoint publication remains a control-plane integration
+concern.
+
+## Supervisor Daemon
+
+Build the combined Raft/daemon binary with:
+
+```bash
+cargo build --features node,daemon --bin vannak
+```
+
+To enable the concrete Ipto writer in that process, include `ipto-writer` and
+pass `--with-ipto`:
+
+```bash
+cargo build --features node,daemon,ipto-writer --bin vannak
+target/debug/vannak --outbox /tmp/vannak/metadata-outbox.seg default-outbox vannak \
+  --journal /tmp/vannak/process-events.seg \
+  --with-ipto --ipto-tenant 1
+```
+
+If the configured outbox or journal file already exists, the supervisor
+validates and reopens it for append. The HTTP daemon parses `/ingest` and
+`/query` bodies as JSON and rejects unknown event kinds or process statuses
+instead of silently defaulting them.
 
 ## Crate Layout
 

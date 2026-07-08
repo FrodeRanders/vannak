@@ -605,10 +605,13 @@ outbox boundaries:
   lookup, recovery replay, and owned service snapshots.
 
 This is intentionally only the local persistence, replay, append recovery, and
-checkpoint-data boundary. Retry backoff, automatic writer task scheduling,
-checkpoint publication, and discovery of owned segments at process startup
-remain separate concerns so they can be attached to Raft-controlled ownership
-without changing code that produces process events or metadata write payloads.
+checkpoint-data boundary. The `daemon` feature attaches segment discovery and a
+lease-gated background writer loop at the supervisor boundary; the `vannak`
+binary reopens existing outbox and process-journal segments when configured
+paths already exist. Checkpoint publication and richer retry policy remain
+separate control-plane concerns so they can be attached to Raft-controlled
+ownership without changing code that produces process events or metadata write
+payloads.
 
 ## 9. Raft-Controlled State
 

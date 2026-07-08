@@ -3,7 +3,8 @@
 
 Rebalancing moves the durable metadata for a shard range from one \ipto{}
 instance to another after a placement change. \vannak{} provides the building
-blocks for this, while the surrounding automation remains future work.
+blocks and local daemon monitoring for this, while cluster-wide progress
+checkpointing and cut-over coordination remain future work.
 
 \subsection{Motivation}
 
@@ -93,14 +94,16 @@ Use explicit rebalancing rather than query fallback when:
 \item compliance requires data to physically reside on its new owner.
 \end{itemize}
 
-\subsection{Not Yet Implemented}
+\subsection{Current Orchestration}
 
-The primitives above exist and are tested, but the surrounding orchestration is
-not yet built. There is currently no automatic trigger that detects a placement
-change and schedules rebalancing, no progress checkpoint specific to a
-rebalance, and no coordinated cut-over that fences the old target. Operators
-invoke \texttt{rebalance\_shard\_range\_to} explicitly; placement-driven,
-checkpointed, cluster-coordinated rebalancing is planned future work that builds
-on writer leases and outbox checkpoints.
+The primitives above exist and are tested. \texttt{daemon.rs} also provides
+\texttt{run\_rebalance\_monitor}, which watches the local
+\texttt{ClusterControlState}, detects placement epoch changes, computes moved
+shard ranges, and drains matching outbox records to the new target through an
+\texttt{IptoWriter}. This is still local orchestration: there is no dedicated
+rebalance progress checkpoint and no cluster-wide cut-over protocol that fences
+the old target beyond the existing writer-lease mechanism. Operators can still
+invoke \texttt{rebalance\_shard\_range\_to} explicitly when they need a direct,
+bounded shard-range replay.
 
 \endinput

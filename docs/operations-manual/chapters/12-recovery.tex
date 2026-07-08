@@ -132,15 +132,22 @@ the \raft{} log and state are file-backed. A restarted node recovers from these.
 
 \subsection{Segment Discovery at Startup}
 
-When the \texttt{vannak} supervisor binary starts, it scans the segment
-directory for \texttt{.seg} files using \texttt{discover\_segments}. Each file
-is validated against the Vannak segment magic (\texttt{VANNAK01}). Valid
-segments are reported with their manifests (record count, byte length,
-checksum); files failing magic validation are listed as \texttt{invalid}
-so the operator can investigate. If the directory does not exist or is empty,
-discovery returns silently. This provides an automatic inventory of durable
-segments at daemon startup, enabling background delivery resumption and
-recovery planning before the first event is ingested.
+When the \texttt{vannak} supervisor binary starts, it scans the configured
+segment directory for \texttt{.seg} files using \texttt{discover\_segments}.
+Each file is validated against the Vannak segment magic (\texttt{VANNAK01}).
+Valid segments are reported with their manifests (record count, byte length,
+checksum); files failing magic validation are listed as \texttt{invalid} so the
+operator can investigate. If the directory does not exist or is empty,
+discovery returns silently.
+
+The configured \shellcmd{--outbox} path is then handled as durable service
+state. If the file exists, the supervisor calls
+\texttt{VannakService::recover\_after}, rebuilds pending outbox entries, and
+reopens the segment for append; if it does not exist, it creates a new segment.
+The configured \shellcmd{--journal} path follows the same pattern with
+\texttt{ProcessEventJournal::recover}; recovered process events are replayed
+into the hot index before new requests are served. This makes ordinary daemon
+restart use the same recovery path as explicit recovery tooling.
 
 \subsection{Degraded Mode}
 

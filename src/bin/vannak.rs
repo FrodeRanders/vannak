@@ -46,13 +46,19 @@ use graft_transport::client::RaftClient;
 use tokio::runtime::Runtime;
 
 use vannak::cluster::{
-    ClusterControlState, IptoPlacementMap, IptoPlacementSlot, NodeId, PlacementEpoch,
+    ClusterControlCommand, ClusterControlState, IptoPlacementMap, IptoPlacementSlot, LeaseEpoch,
+    NodeId, PlacementEpoch, WriterLease,
 };
 use vannak::ipto::{IptoInstanceId, IptoMapping};
 use vannak::raft_sm::ClusterStateMachine;
 use vannak::service::VannakService;
 use vannak::storage::SegmentId;
 use vannak::{BackgroundWriterConfig, Daemon, DaemonConfig};
+
+#[cfg(feature = "ipto-writer")]
+use ipto_rust::{backend::Backend, backends::postgres::PostgresBackend, repo::RepoService};
+#[cfg(feature = "ipto-writer")]
+use vannak::ipto_adapter::IptoRepoWriter;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -101,7 +107,7 @@ fn run() -> Result<(), String> {
     }
 
     // -- placement map --
-    let placement = config.placement.unwrap_or_else(|| {
+    let placement = config.placement.clone().unwrap_or_else(|| {
         IptoPlacementMap::new(
             PlacementEpoch(1),
             vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-default"), 1).unwrap()],
@@ -149,23 +155,58 @@ fn run() -> Result<(), String> {
     }
 
     // -- service --
-    let mut svc = VannakService::create(
-        placement,
-        mapping,
-        &outbox_path,
-        outbox_segment_id.clone(),
-        outbox_node_id.clone(),
-    )
-    .map_err(|e| e.to_string())?;
+    let mut svc = if std::path::Path::new(&outbox_path).exists() {
+        let recovery = VannakService::recover_after(
+            placement.clone(),
+            mapping,
+            &outbox_path,
+            outbox_segment_id.clone(),
+            outbox_node_id.clone(),
+            None,
+        )
+        .map_err(|e| e.to_string())?;
+        eprintln!(
+            "vannak: recovered metadata outbox: scanned={} replayed={}",
+            recovery.summary.scanned_records, recovery.summary.replayed_records
+        );
+        recovery.service
+    } else {
+        VannakService::create(
+            placement.clone(),
+            mapping,
+            &outbox_path,
+            outbox_segment_id.clone(),
+            outbox_node_id.clone(),
+        )
+        .map_err(|e| e.to_string())?
+    };
 
     // -- optional process event journal --
     if let Some(ref journal_path) = config.process_journal_path {
-        let journal = vannak::ProcessEventJournal::create(
-            journal_path,
-            SegmentId::from("process-journal"),
-            outbox_node_id.clone(),
-        )
-        .map_err(|e| e.to_string())?;
+        let journal = if std::path::Path::new(journal_path).exists() {
+            let recovery = vannak::ProcessEventJournal::recover(
+                journal_path,
+                SegmentId::from("process-journal"),
+                outbox_node_id.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            for event in &recovery.replay.events {
+                svc.ingest_process_event(event.event.clone())
+                    .map_err(|e| e.to_string())?;
+            }
+            eprintln!(
+                "vannak: recovered process journal: scanned={} replayed={}",
+                recovery.replay.summary.scanned_records, recovery.replay.summary.replayed_records
+            );
+            recovery.journal
+        } else {
+            vannak::ProcessEventJournal::create(
+                journal_path,
+                SegmentId::from("process-journal"),
+                outbox_node_id.clone(),
+            )
+            .map_err(|e| e.to_string())?
+        };
         svc = svc.with_process_event_journal(journal);
     }
 
@@ -188,28 +229,50 @@ fn run() -> Result<(), String> {
 
     // -- initialize control state with placement map --
     {
-        let placement_map = IptoPlacementMap::new(
-            PlacementEpoch(1),
-            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-default"), 1).unwrap()],
-            vec![],
-        )
-        .map_err(|e| e.to_string())?;
         let mut state = control_state.lock().unwrap();
         state
-            .apply(vannak::cluster::ClusterControlCommand::AddNode(
-                outbox_node_id.clone(),
-            ))
+            .apply(ClusterControlCommand::AddNode(outbox_node_id.clone()))
             .unwrap();
         state
-            .apply(vannak::cluster::ClusterControlCommand::SetIptoPlacementMap(
-                placement_map,
+            .apply(ClusterControlCommand::SetIptoPlacementMap(
+                placement.clone(),
             ))
             .unwrap();
+        for target in placement.instances() {
+            state
+                .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
+                    target,
+                    holder: outbox_node_id.clone(),
+                    epoch: LeaseEpoch(1),
+                }))
+                .unwrap();
+        }
     }
 
     // -- background writer snapshot handle --
-    let writer_snapshot: Arc<Mutex<Option<vannak::BackgroundWriterSnapshot>>> =
+    let mut writer_snapshot: Arc<Mutex<Option<vannak::BackgroundWriterSnapshot>>> =
         Arc::new(Mutex::new(None));
+
+    if config.with_ipto {
+        #[cfg(feature = "ipto-writer")]
+        {
+            let backend: Arc<dyn Backend> = Arc::new(PostgresBackend::new());
+            let repo = Arc::new(RepoService::new(backend));
+            let mut writer = IptoRepoWriter::new(repo, config.ipto_tenant_id);
+            writer.configure_sdl().map_err(|e| e.to_string())?;
+            writer_snapshot = daemon.start_background_writer(
+                control_state.clone(),
+                outbox_node_id.clone(),
+                Arc::new(Mutex::new(writer)),
+            );
+            eprintln!(
+                "vannak: background Ipto writer enabled for tenant {}",
+                config.ipto_tenant_id
+            );
+        }
+        #[cfg(not(feature = "ipto-writer"))]
+        return Err("--with-ipto requires the ipto-writer feature".to_string());
+    }
 
     // -- raft node (background thread) --
     if let Some(ref raft_config) = config.raft {
@@ -262,6 +325,8 @@ struct SupervisorConfig {
     process_journal_path: Option<String>,
     writer_interval_secs: u64,
     placement: Option<IptoPlacementMap>,
+    with_ipto: bool,
+    ipto_tenant_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -285,6 +350,7 @@ struct KafkaArgs {
 
 fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
     let mut config = SupervisorConfig::default();
+    config.ipto_tenant_id = 1;
     let mut idx = 0usize;
 
     while idx < args.len() {
@@ -386,6 +452,19 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 }
                 config.writer_interval_secs =
                     args[idx + 1].parse().map_err(|_| "invalid interval")?;
+                idx += 2;
+            }
+            "--with-ipto" => {
+                config.with_ipto = true;
+                idx += 1;
+            }
+            "--ipto-tenant" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage());
+                }
+                config.ipto_tenant_id = args[idx + 1]
+                    .parse()
+                    .map_err(|_| "invalid Ipto tenant id")?;
                 idx += 2;
             }
             "--placement" => {
@@ -752,6 +831,10 @@ Options:
       Process event journal segment path
   --writer-interval <secs>
       Background writer drain interval in seconds (default: 5)
+  --with-ipto
+      Start the PostgreSQL-backed Ipto writer (requires ipto-writer feature)
+  --ipto-tenant <id>
+      Ipto tenant id for --with-ipto (default: 1)
   --placement <epoch> <target> <vnodes> [<target> <vnodes> ...]
       Ipto placement map (default: single ipto-default with 1 vnode)
 "#

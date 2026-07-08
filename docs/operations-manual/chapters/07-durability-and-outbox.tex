@@ -104,6 +104,12 @@ combines replay with validated append reopening, and
 \texttt{VannakService::recover\_process\_events\_into\_hot\_index} can rebuild a
 single-node hot index from the local process-event segment.
 
+When the \texttt{vannak} supervisor is started with \shellcmd{--journal <path>},
+it creates a new process-event journal if the path is missing. If the file
+already exists, it calls \texttt{ProcessEventJournal::recover}, replays the
+owned events into the hot index, and continues appending to the validated
+segment.
+
 \subsection{MetadataOutbox}
 
 \texttt{MetadataOutbox} is the in-memory delivery queue. Entries are keyed by
@@ -182,6 +188,12 @@ After a restart, pending delivery state is rebuilt from the segment.
 outbox. \texttt{replay\_metadata\_outbox\_segment\_after} skips records at or
 before a checkpoint offset and returns a \texttt{MetadataOutboxReplay} containing
 the rebuilt outbox and a \texttt{MetadataOutboxReplaySummary}.
+
+The \texttt{vannak} supervisor uses this path for its configured
+\shellcmd{--outbox <path> <seg-id> <node-id>}. A missing file creates a new
+segment; an existing file is recovered with \texttt{VannakService::recover\_after}
+and then reopened for append. This makes ordinary process restart use the same
+validated replay path as explicit recovery code.
 
 \begin{lstlisting}
 pub struct MetadataOutboxReplaySummary {

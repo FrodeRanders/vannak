@@ -26,6 +26,7 @@ use crate::cluster::{ClusterControlState, NodeId};
 use crate::ipto::{IptoWriter, MetadataOutboxDrainSummary};
 use crate::service::{VannakService, VannakServiceError, VannakServiceSnapshot};
 use crate::storage::{SegmentError, SegmentManifest};
+use serde_json::Value;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -536,9 +537,10 @@ fn handle_ingest_request(
 /// `kind` accepts Durga-like names: `ProcessStarted`, `ProcessCompleted`,
 /// `ProcessFailed`, `ActivityEntered`, `ActivityCompleted`, etc.
 fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
-    let pi_id = extract_json_string_field(json, "process_instance_id")?;
-    let pipeline_id = extract_json_string_field(json, "pipeline_id")?;
-    let kind_str = extract_json_string_field(json, "kind")?;
+    let value: Value = serde_json::from_str(json).ok()?;
+    let pi_id = json_string_field(&value, "process_instance_id")?;
+    let pipeline_id = json_string_field(&value, "pipeline_id")?;
+    let kind_str = json_string_field(&value, "kind")?;
 
     let kind = match kind_str.as_str() {
         "ProcessStarted" => crate::process::EventKind::ProcessStarted,
@@ -549,10 +551,10 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
         "ActivityCancelled" => crate::process::EventKind::ActivityCancelled,
         "ActivityEscalated" => crate::process::EventKind::ActivityEscalated,
         "GatewayTaken" => crate::process::EventKind::GatewayTaken,
-        _ => crate::process::EventKind::ActivityEntered,
+        _ => return None,
     };
 
-    let event_id = extract_json_string_field(json, "event_id")
+    let event_id = json_string_field(&value, "event_id")
         .map(crate::ingest::EventId::from)
         .unwrap_or_else(|| {
             use std::sync::atomic::AtomicU64;
@@ -563,20 +565,20 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
             ))
         });
 
-    let timestamp = extract_json_string_field(json, "timestamp")
+    let timestamp = json_string_field(&value, "timestamp")
         .map(crate::ingest::EventTimestamp::from)
-        .unwrap_or_else(|| crate::ingest::EventTimestamp::from("1970-01-01T00:00:00Z"));
+        .unwrap_or_else(|| crate::ingest::EventTimestamp::from("unknown"));
 
-    let tenant_id = extract_json_string_field(json, "tenant_id")
+    let tenant_id = json_string_field(&value, "tenant_id")
         .map(crate::process::TenantId::from)
         .unwrap_or_else(|| crate::process::TenantId::from("demo"));
 
-    let environment_id = extract_json_string_field(json, "environment_id")
+    let environment_id = json_string_field(&value, "environment_id")
         .map(crate::process::EnvironmentId::from)
         .unwrap_or_else(|| crate::process::EnvironmentId::from("demo"));
 
     let activity_id =
-        extract_json_string_field(json, "activity_id").map(crate::process::ActivityId::from);
+        json_string_field(&value, "activity_id").map(crate::process::ActivityId::from);
 
     let mut event = crate::ingest::PipelineEvent::new(
         event_id,
@@ -609,8 +611,21 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
         }
     };
 
-    if body.contains("\"type\":\"ProcessInstance\"")
-        && let Some(id) = extract_json_string_field(body, "process_instance_id")
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return (
+            "400 Bad Request",
+            r#"{"error":"invalid query JSON"}"#.to_string(),
+        );
+    };
+    let Some(query_type) = json_string_field(&value, "type") else {
+        return (
+            "400 Bad Request",
+            r#"{"error":"invalid query"}"#.to_string(),
+        );
+    };
+
+    if query_type == "ProcessInstance"
+        && let Some(id) = json_string_field(&value, "process_instance_id")
     {
         let result = svc.process_instance(&crate::query::ProcessInstanceQuery {
             process_instance_id: crate::process::ProcessInstanceId::from(id),
@@ -634,10 +649,10 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
         }
     }
 
-    if body.contains("\"type\":\"Pipeline\"")
-        && let Some(id) = extract_json_string_field(body, "pipeline_id")
+    if query_type == "Pipeline"
+        && let Some(id) = json_string_field(&value, "pipeline_id")
     {
-        let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
+        let limit_val = json_u64_field(&value, "limit").unwrap_or(100);
         let result = svc.pipeline_instances(&crate::query::PipelineQuery {
             pipeline_id: crate::process::PipelineId::from(id),
             limit: crate::query::QueryLimit::new(limit_val as usize),
@@ -645,17 +660,22 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
         return ("200 OK", serialize_query_result(&result));
     }
 
-    if body.contains("\"type\":\"ProcessStatus\"")
-        && let Some(status_str) = extract_json_string_field(body, "status")
+    if query_type == "ProcessStatus"
+        && let Some(status_str) = json_string_field(&value, "status")
     {
         let status = match status_str.as_str() {
             "Active" => crate::process::ProcessStatus::Active,
             "Completed" => crate::process::ProcessStatus::Completed,
             "Failed" => crate::process::ProcessStatus::Failed,
             "Cancelled" => crate::process::ProcessStatus::Cancelled,
-            _ => crate::process::ProcessStatus::Active,
+            _ => {
+                return (
+                    "400 Bad Request",
+                    r#"{"error":"invalid process status"}"#.to_string(),
+                );
+            }
         };
-        let limit_val = extract_json_u64_field(body, "limit").unwrap_or(100);
+        let limit_val = json_u64_field(&value, "limit").unwrap_or(100);
         let result = svc.process_instances_by_status(&crate::query::ProcessStatusQuery {
             status,
             limit: crate::query::QueryLimit::new(limit_val as usize),
@@ -723,22 +743,12 @@ fn serialize_query_result(result: &crate::query::QueryResult) -> String {
     }
 }
 
-fn extract_json_string_field(json: &str, field: &str) -> Option<String> {
-    let pattern = format!("\"{field}\":\"");
-    let start = json.find(&pattern)?;
-    let after = &json[start + pattern.len()..];
-    let end = after.find('"')?;
-    Some(after[..end].to_string())
+fn json_string_field(value: &Value, field: &str) -> Option<String> {
+    value.get(field)?.as_str().map(ToOwned::to_owned)
 }
 
-fn extract_json_u64_field(json: &str, field: &str) -> Option<u64> {
-    let pattern = format!("\"{field}\":");
-    let start = json.find(&pattern)?;
-    let after = &json[start + pattern.len()..];
-    let end = after
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(after.len());
-    after[..end].parse().ok()
+fn json_u64_field(value: &Value, field: &str) -> Option<u64> {
+    value.get(field)?.as_u64()
 }
 
 fn build_health_json(
@@ -1621,6 +1631,40 @@ mod tests {
 
         assert_eq!(summary.acknowledged, 1);
         assert_eq!(recording.written, 1);
+    }
+
+    #[test]
+    fn ingest_json_parser_rejects_unknown_event_kind() {
+        let event = parse_ingest_event_json(
+            r#"{"process_instance_id":"p1","pipeline_id":"pipe","kind":"Bogus"}"#,
+        );
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn query_json_parser_rejects_unknown_status() {
+        let dir = tempdir();
+        let path = dir.join("query-parser.seg");
+        let svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1"),
+            &path,
+            SegmentId::from("query-parser-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+        let service = Arc::new(Mutex::new(svc));
+
+        let (status, body) =
+            handle_query_request(&service, r#"{"type":"ProcessStatus","status":"Bogus"}"#);
+
+        assert_eq!(status, "400 Bad Request");
+        assert!(body.contains("invalid process status"));
     }
 
     // -- helpers --

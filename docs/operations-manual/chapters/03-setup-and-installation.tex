@@ -52,11 +52,16 @@ Building with feature flags enables the optional adapters:
 cargo build --features ipto-writer
 cargo build --features raft
 cargo build --features node --bin vannak-node
+cargo build --features node,daemon --bin vannak
+cargo build --features node,daemon,ipto-writer --bin vannak
 \end{lstlisting}
 
 \begin{vnote}
 The \texttt{node} feature implies \texttt{raft}. The \texttt{vannak-node}
-binary is only compiled when the \texttt{node} feature is active.
+binary is only compiled when the \texttt{node} feature is active. The
+\texttt{vannak} supervisor binary requires \texttt{node} and \texttt{daemon};
+add \texttt{ipto-writer} when the same process should start the concrete
+PostgreSQL-backed \ipto{} writer with \shellcmd{--with-ipto}.
 \end{vnote}
 
 \subsection{Docker Compose for PostgreSQL}

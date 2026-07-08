@@ -107,6 +107,40 @@ Variable & Default \\
 These defaults match the credentials set by \filepath{docker-compose.test.yml},
 so the integration test connects with no extra configuration.
 
+\subsection{Supervisor Daemon Options}
+
+The \texttt{vannak} supervisor binary combines the daemon service plane with
+optional Raft and Kafka components. It is built with \texttt{node} +
+\texttt{daemon}; include \texttt{ipto-writer} to enable the concrete
+PostgreSQL-backed writer in the same process.
+
+\begin{lstlisting}[numbers=none]
+vannak --outbox /var/lib/vannak/metadata-outbox.seg default-outbox vannak-1 \
+       --journal /var/lib/vannak/process-events.seg \
+       --placement 1 ipto-default 128 \
+       --with-ipto --ipto-tenant 1
+\end{lstlisting}
+
+\texttt{--outbox} supplies the metadata outbox segment path, segment id, and
+node id. If the segment already exists, startup uses
+\texttt{VannakService::recover\_after} and reopens the validated segment for
+append; otherwise it creates a new segment. \texttt{--journal} behaves the same
+way for the process-event journal: an existing segment is replayed into the hot
+index and reopened, while a missing path creates a fresh journal.
+
+\texttt{--placement} configures the same \texttt{IptoPlacementMap} for both the
+service and the local control state. At startup the supervisor also grants the
+local node a writer lease for each configured placement target, so the optional
+background writer can drain only targets it is authorized to write.
+
+\texttt{--with-ipto} starts the background writer with \texttt{IptoRepoWriter}.
+The writer reads the \texttt{IPTO\_PG\_*} environment variables above,
+configures the built-in PROV-O SDL, and drains pending outbox entries according
+to \texttt{--writer-interval}. Without \texttt{--with-ipto}, the daemon still
+serves health, ingest, and query requests, but no concrete \ipto{} writer is
+started. \texttt{--ipto-tenant} selects the tenant id for the writer and
+defaults to \texttt{1}.
+
 \subsection{The PROV-O SDL Schema}
 
 \texttt{IptoRepoWriter} ships a built-in SDL schema, the constant
