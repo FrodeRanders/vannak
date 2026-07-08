@@ -225,7 +225,7 @@ if [ "$RUN_FULL" = true ]; then
     echo ""
     echo "==> Publishing test event to Kafka..."
     echo '{"processInstanceId":"test-1","processId":"test-pipeline","activityId":"step-1","status":"STARTED","eventType":"ACTIVITY_ENTERED","timestamp":"2026-07-01T10:00:00Z"}' | \
-        docker exec -i vannak-full-kafka rpk topic produce process-events -f '%v' 2>/dev/null
+        docker exec -i vannak-full-kafka rpk topic produce process-events-test-pipeline -f '%v' 2>/dev/null
     echo "  Published."
 
     sleep 3

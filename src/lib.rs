@@ -85,8 +85,12 @@ pub use ipto::{
 };
 #[cfg(feature = "kafka-client")]
 pub use kafka_client::{
-    KafkaClientError, KafkaPayloadFormat, KafkaProcessConsumer, KafkaProcessConsumerConfig,
-    KafkaProcessConsumerSnapshot, KafkaRebalanceEvent, KafkaRebalanceSnapshot,
+    DURGA_METADATA_EVENTS_TOPIC_PREFIX, DURGA_PROCESS_EVENTS_TOPIC_PREFIX,
+    DURGA_VALIDATION_TOPIC_SUFFIX, KafkaClientError, KafkaPayloadFormat, KafkaProcessConsumer,
+    KafkaProcessConsumerConfig, KafkaProcessConsumerSnapshot, KafkaRebalanceEvent,
+    KafkaRebalanceSnapshot, durga_metadata_events_topic, durga_process_events_topic,
+    durga_validation_events_topic, is_durga_metadata_events_topic, is_durga_process_events_topic,
+    is_durga_validation_events_topic,
 };
 #[cfg(feature = "sitas-runtime")]
 pub use kafka_ingest::{

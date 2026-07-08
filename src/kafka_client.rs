@@ -50,12 +50,52 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+/// Prefix for Durga's qualified per-process lifecycle topics.
+pub const DURGA_PROCESS_EVENTS_TOPIC_PREFIX: &str = "process-events-";
+/// Suffix for Durga validation/shadow lifecycle topics.
+pub const DURGA_VALIDATION_TOPIC_SUFFIX: &str = "-validation";
+/// Prefix for Durga's qualified per-process Vannak metadata topics.
+pub const DURGA_METADATA_EVENTS_TOPIC_PREFIX: &str = "vannak-metadata-events-";
+
+/// Returns Durga's qualified lifecycle topic for one process id.
+pub fn durga_process_events_topic(process_id: &str) -> String {
+    format!("{DURGA_PROCESS_EVENTS_TOPIC_PREFIX}{process_id}")
+}
+
+/// Returns Durga's qualified validation lifecycle topic for one process id.
+pub fn durga_validation_events_topic(process_id: &str) -> String {
+    format!("{DURGA_PROCESS_EVENTS_TOPIC_PREFIX}{process_id}{DURGA_VALIDATION_TOPIC_SUFFIX}")
+}
+
+/// Returns Durga's qualified Vannak metadata topic for one process id.
+pub fn durga_metadata_events_topic(process_id: &str) -> String {
+    format!("{DURGA_METADATA_EVENTS_TOPIC_PREFIX}{process_id}")
+}
+
+/// Whether a topic is a production Durga lifecycle topic.
+pub fn is_durga_process_events_topic(topic: &str) -> bool {
+    topic.starts_with(DURGA_PROCESS_EVENTS_TOPIC_PREFIX)
+        && !topic.ends_with(DURGA_VALIDATION_TOPIC_SUFFIX)
+}
+
+/// Whether a topic is a Durga validation lifecycle topic.
+pub fn is_durga_validation_events_topic(topic: &str) -> bool {
+    topic.starts_with(DURGA_PROCESS_EVENTS_TOPIC_PREFIX)
+        && topic.ends_with(DURGA_VALIDATION_TOPIC_SUFFIX)
+}
+
+/// Whether a topic is a Durga per-process Vannak metadata topic.
+pub fn is_durga_metadata_events_topic(topic: &str) -> bool {
+    topic.starts_with(DURGA_METADATA_EVENTS_TOPIC_PREFIX)
+}
+
 /// Configuration for a process-event Kafka consumer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KafkaProcessConsumerConfig {
     brokers: String,
     group_id: String,
     topics: Vec<String>,
+    isolation_level: String,
     payload_format: KafkaPayloadFormat,
     durga_source_id: SourceId,
     durga_tenant_id: TenantId,
@@ -76,6 +116,7 @@ impl KafkaProcessConsumerConfig {
             brokers: brokers.into(),
             group_id: group_id.into(),
             topics: topics.into_iter().map(Into::into).collect(),
+            isolation_level: String::from("read_committed"),
             payload_format: KafkaPayloadFormat::VannakBinary,
             durga_source_id: SourceId::from("kafka"),
             durga_tenant_id: TenantId::from("default"),
@@ -84,6 +125,23 @@ impl KafkaProcessConsumerConfig {
             enable_partition_eof: false,
             auto_offset_reset: String::from("earliest"),
         }
+    }
+
+    /// Creates a Kafka consumer config for Durga's qualified per-process
+    /// lifecycle topics (`process-events-{processId}`).
+    pub fn for_durga_processes(
+        brokers: impl Into<String>,
+        group_id: impl Into<String>,
+        process_ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self::new(
+            brokers,
+            group_id,
+            process_ids
+                .into_iter()
+                .map(|process_id| durga_process_events_topic(&process_id.into())),
+        )
+        .with_payload_format(KafkaPayloadFormat::DurgaJson)
     }
 
     /// Sets the poll timeout used by [`KafkaProcessConsumer::poll_once`].
@@ -101,6 +159,15 @@ impl KafkaProcessConsumerConfig {
     /// Sets Kafka's `auto.offset.reset` policy for new consumer groups.
     pub fn with_auto_offset_reset(mut self, auto_offset_reset: impl Into<String>) -> Self {
         self.auto_offset_reset = auto_offset_reset.into();
+        self
+    }
+
+    /// Sets Kafka's `isolation.level`.
+    ///
+    /// Defaults to `read_committed` so Vannak does not observe aborted Durga
+    /// Rust worker transactions.
+    pub fn with_isolation_level(mut self, isolation_level: impl Into<String>) -> Self {
+        self.isolation_level = isolation_level.into();
         self
     }
 
@@ -148,6 +215,11 @@ impl KafkaProcessConsumerConfig {
         self.payload_format
     }
 
+    /// Returns the configured Kafka isolation level.
+    pub fn isolation_level(&self) -> &str {
+        &self.isolation_level
+    }
+
     fn validate(&self) -> Result<(), KafkaClientError> {
         if self.brokers.trim().is_empty() {
             return Err(KafkaClientError::InvalidConfig(
@@ -167,6 +239,11 @@ impl KafkaProcessConsumerConfig {
         if self.auto_offset_reset.trim().is_empty() {
             return Err(KafkaClientError::InvalidConfig(
                 "auto.offset.reset must not be empty".to_string(),
+            ));
+        }
+        if self.isolation_level.trim().is_empty() {
+            return Err(KafkaClientError::InvalidConfig(
+                "isolation.level must not be empty".to_string(),
             ));
         }
         Ok(())
@@ -248,6 +325,7 @@ impl KafkaProcessConsumer {
                 .set("group.id", config.group_id())
                 .set("enable.auto.commit", "false")
                 .set("auto.offset.reset", &config.auto_offset_reset)
+                .set("isolation.level", config.isolation_level())
                 .set(
                     "enable.partition.eof",
                     if config.enable_partition_eof {
@@ -873,6 +951,56 @@ mod tests {
                 .validate(),
             Err(KafkaClientError::InvalidConfig(_))
         ));
+        assert!(matches!(
+            KafkaProcessConsumerConfig::new("localhost:9092", "group", ["topic"])
+                .with_isolation_level("")
+                .validate(),
+            Err(KafkaClientError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn durga_topic_helpers_use_qualified_topics() {
+        assert_eq!(
+            durga_process_events_topic("orders"),
+            "process-events-orders"
+        );
+        assert_eq!(
+            durga_validation_events_topic("orders"),
+            "process-events-orders-validation"
+        );
+        assert_eq!(
+            durga_metadata_events_topic("orders"),
+            "vannak-metadata-events-orders"
+        );
+        assert!(is_durga_process_events_topic("process-events-orders"));
+        assert!(!is_durga_process_events_topic(
+            "process-events-orders-validation"
+        ));
+        assert!(is_durga_validation_events_topic(
+            "process-events-orders-validation"
+        ));
+        assert!(is_durga_metadata_events_topic(
+            "vannak-metadata-events-orders"
+        ));
+    }
+
+    #[test]
+    fn durga_process_config_uses_qualified_topics_and_read_committed() {
+        let config = KafkaProcessConsumerConfig::for_durga_processes(
+            "localhost:9092",
+            "group",
+            ["orders", "invoices"],
+        );
+        assert_eq!(
+            config.topics(),
+            &[
+                "process-events-orders".to_string(),
+                "process-events-invoices".to_string()
+            ]
+        );
+        assert_eq!(config.payload_format(), KafkaPayloadFormat::DurgaJson);
+        assert_eq!(config.isolation_level(), "read_committed");
     }
 
     #[test]

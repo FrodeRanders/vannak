@@ -168,7 +168,7 @@ print(f'  placement epoch:    {d[\"placement_epoch\"]}')
     echo
 
     log "Demo complete."
-    log "  Kafka producer: docker exec -i vannak-full-kafka rpk topic produce process-events -f '%v'"
+    log "  Kafka producer: docker exec -i vannak-full-kafka rpk topic produce process-events-test-pipeline -f '%v'"
     log "  Vannak health:  curl http://127.0.0.1:19090/health | jq"
     log "  Tear down:      $0 --down"
 }

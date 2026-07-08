@@ -10,7 +10,7 @@
 #
 #   # Produce a test Durga JSON event to Kafka
 #   echo '{"processInstanceId":"demo-1","processId":"demo-pipeline","status":"STARTED","eventType":"ACTIVITY_ENTERED","timestamp":"2026-07-01T10:00:00Z"}' | \
-#     docker exec -i vannak-full-kafka rpk topic produce process-events -f '%v'
+#     docker exec -i vannak-full-kafka rpk topic produce process-events-demo-pipeline -f '%v'
 #
 #   # Query the hot index for pipeline instances
 #   curl -s -X POST http://127.0.0.1:19090/query \

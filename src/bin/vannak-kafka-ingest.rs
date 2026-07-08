@@ -23,6 +23,7 @@ use std::time::Duration;
 use vannak::{
     EnvironmentId, KafkaPayloadFormat, KafkaProcessConsumer, KafkaProcessConsumerConfig, NodeId,
     ProcessEventJournal, SegmentId, SitasRuntimeConfig, SitasShardRuntime, SourceId, TenantId,
+    durga_process_events_topic,
 };
 
 fn main() {
@@ -197,6 +198,14 @@ impl CliConfig {
                         })?;
                     idx += 2;
                 }
+                "--durga-process" => {
+                    if idx + 1 >= args.len() {
+                        return Err(usage());
+                    }
+                    payload_format = KafkaPayloadFormat::DurgaJson;
+                    topics.push(durga_process_events_topic(&args[idx + 1]));
+                    idx += 2;
+                }
                 "--source-id" => {
                     if idx + 1 >= args.len() {
                         return Err(usage());
@@ -258,6 +267,27 @@ fn parse_positive_usize(value: &str, label: &str) -> Result<usize, String> {
 }
 
 fn usage() -> String {
-    "usage: vannak-kafka-ingest <brokers> <group-id> <shards> <mailbox-capacity> [--payload-format vannak-binary|durga-json] [--source-id <id>] [--tenant-id <id>] [--environment-id <id>] [--journal <path> <segment-id> <node-id>] [--poll-timeout-ms <ms>] [--report-interval <n>] <topic>..."
+    "usage: vannak-kafka-ingest <brokers> <group-id> <shards> <mailbox-capacity> [--payload-format vannak-binary|durga-json] [--durga-process <process-id>] [--source-id <id>] [--tenant-id <id>] [--environment-id <id>] [--journal <path> <segment-id> <node-id>] [--poll-timeout-ms <ms>] [--report-interval <n>] <topic>..."
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durga_process_option_adds_qualified_topic_and_json_format() {
+        let config = CliConfig::parse(vec![
+            "localhost:9092".to_string(),
+            "group".to_string(),
+            "2".to_string(),
+            "16".to_string(),
+            "--durga-process".to_string(),
+            "orders".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(config.topics, vec!["process-events-orders".to_string()]);
+        assert_eq!(config.payload_format, KafkaPayloadFormat::DurgaJson);
+    }
 }

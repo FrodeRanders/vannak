@@ -74,11 +74,13 @@ Implemented so far:
   Sitas mailboxes, retains pending records across backpressure retries, and
   returns the next committable offset;
 - feature-gated `rdkafka` consumer and `vannak-kafka-ingest` runner
-  (`kafka-client`) that subscribes to process-event topics, decodes either
-  Vannak binary process-event payloads or Durga JSON monitor events, feeds
-  Sitas workers, pauses partitions on Sitas mailbox backpressure, resumes them
-  after admission, records Kafka assignment/revocation callbacks, and commits
-  offsets after durable/Sitas admission;
+  (`kafka-client`) that subscribes to qualified Durga process-event topics
+  (`process-events-{processId}`), decodes either Vannak binary process-event
+  payloads or Durga JSON monitor events, reads with `read_committed` isolation
+  so aborted Durga worker transactions stay invisible, feeds Sitas workers,
+  pauses partitions on Sitas mailbox backpressure, resumes them after
+  admission, records Kafka assignment/revocation callbacks, and commits offsets
+  after durable/Sitas admission;
 - opt-in Kafka smoke test (`kafka_integration`) and Redpanda Compose file for
   verifying the Kafka-to-Sitas path against a live broker;
 - data-individual metadata/provenance event model;

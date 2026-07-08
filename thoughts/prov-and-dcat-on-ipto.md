@@ -70,8 +70,10 @@ BPMN-to-Kafka-native process runtime. Key facts:
 - **Event types**: `PROCESS_STARTED`, `ACTIVITY_ENTERED`, `ACTIVITY_COMPLETED`,
   `ACTIVITY_ESCALATED`, `ACTIVITY_CANCELLED`, `GATEWAY_TAKEN`,
   `PROCESS_COMPLETED`, `PROCESS_FAILED`.
-- **Kafka topics**: One per process (`process-events-{processId}`), plus
-  `process-state` (compacted), monitoring projections.
+- **Kafka topics**: One lifecycle topic per process
+  (`process-events-{processId}`); validation/shadow lifecycle uses
+  `process-events-{processId}-validation`; data-individual metadata emitted for
+  Vannak uses `vannak-metadata-events-{processId}`.
 - **Plugin system**: 15 plugins (Mask, JsonTransform, KvEnricher, etc.).
   `KvEnricher` shows the enrichment pattern and has a documented Kafka-topic
   source mode for future metadata lookups.
@@ -503,8 +505,8 @@ Two integration paths, not mutually exclusive:
 pattern) that runs inside the Durga process runtime and emits
 data-individual metadata alongside process lifecycle events. The plugin
 receives the data item payload, the activity context, and a metadata mapping
-configuration. It publishes metadata events to a Vannak-dedicated Kafka topic
-for ingest.
+configuration. It publishes metadata events to the Durga/Vannak per-process
+Kafka topic (`vannak-metadata-events-{processId}`) for ingest.
 
 **Path B: Kafka Streams adapter.** A separate Kafka Streams topology that
 consumes Durga `ProcessEvent` topics, enriches them with metadata from an

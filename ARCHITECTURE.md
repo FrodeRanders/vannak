@@ -868,11 +868,13 @@ and returns the next offset a concrete consumer may commit.
 nonblocking variant: a full Sitas mailbox leaves the record pending and
 uncommitted while preserving any journal offset already written. With the
 `kafka-client` feature, `kafka_client` and `vannak-kafka-ingest` provide an
-`rdkafka` consumer loop: subscribe to process-event topics, poll records, decode
-Vannak binary process-event payloads or Durga JSON monitor events, submit them
-to Sitas workers, pause partitions when Sitas applies mailbox backpressure,
-resume them after admission, and commit offsets after durable/Sitas admission
-succeeds. The consumer also installs `rdkafka` rebalance callbacks, records
+`rdkafka` consumer loop: subscribe to qualified Durga process-event topics
+(`process-events-{processId}`), poll records, decode Vannak binary process-event
+payloads or Durga JSON monitor events, read with `read_committed` isolation so
+aborted Durga Rust-worker transactions stay invisible, submit them to Sitas
+workers, pause partitions when Sitas applies mailbox backpressure, resume them
+after admission, and commit offsets after durable/Sitas admission succeeds. The
+consumer also installs `rdkafka` rebalance callbacks, records
 assignment/revocation/error counts in an owned `KafkaProcessConsumerSnapshot`,
 and refuses to continue if Kafka revokes a partition while Vannak still holds an
 uncommitted pending record from that partition. The Durga JSON adapter maps

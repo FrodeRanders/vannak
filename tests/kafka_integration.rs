@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rdkafka::ClientConfig;
 use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
 
+use vannak::durga_process_events_topic;
 use vannak::{
     EnvironmentId, KafkaPayloadFormat, KafkaProcessConsumer, KafkaProcessConsumerConfig, SourceId,
     TenantId,
@@ -56,10 +57,11 @@ fn kafka_durga_json_record_feeds_sitas_workers() {
 
     let brokers = kafka_brokers();
     let suffix = unique_suffix();
-    let topic = format!("vannak-process-events-{suffix}");
+    let process_id = format!("pipeline-kafka-smoke-{suffix}");
+    let topic = durga_process_events_topic(&process_id);
     let group_id = format!("vannak-kafka-integration-{suffix}");
 
-    produce_durga_json_record(&brokers, &topic);
+    produce_durga_json_record(&brokers, &topic, &process_id);
 
     let mut runtime = SitasShardRuntime::start(SitasRuntimeConfig::new(2, 16)).unwrap();
     runtime.start_mailbox_workers().unwrap();
@@ -99,31 +101,32 @@ fn kafka_durga_json_record_feeds_sitas_workers() {
     runtime.stop().unwrap();
 }
 
-fn produce_durga_json_record(brokers: &str, topic: &str) {
+fn produce_durga_json_record(brokers: &str, topic: &str, process_id: &str) {
     let producer: BaseProducer = ClientConfig::new()
         .set("bootstrap.servers", brokers)
         .set("message.timeout.ms", "10000")
         .create()
         .unwrap();
-    let payload = br#"{
+    let payload = format!(
+        r#"{{
         "processInstanceId": "instance-kafka-smoke",
-        "processId": "pipeline-kafka-smoke",
+        "processId": "{process_id}",
         "activityId": "extract",
         "tokenId": "token-1",
         "correlationId": "corr-1",
-        "payload": {"records": 1},
+        "payload": {{"records": 1}},
         "status": "STARTED",
         "eventType": "ACTIVITY_ENTERED",
         "processVersion": "v1",
         "businessKey": "business-1",
         "timestamp": "2026-06-30T10:00:00Z"
-    }"#
-    .as_slice();
+    }}"#
+    );
     producer
         .send(
             BaseRecord::to(topic)
                 .key("instance-kafka-smoke")
-                .payload(payload),
+                .payload(payload.as_bytes()),
         )
         .map_err(|(error, _)| error)
         .unwrap();
