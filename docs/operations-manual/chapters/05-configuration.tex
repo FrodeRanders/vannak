@@ -122,7 +122,9 @@ vannak --outbox /var/lib/vannak/metadata-outbox.seg default-outbox vannak-1 \
 \end{lstlisting}
 
 \texttt{--outbox} supplies the metadata outbox segment path, segment id, and
-node id. If the segment already exists, startup uses
+node id. If it is omitted, the default path is under the Raft data directory
+when Raft is configured, otherwise under
+\filepath{\$HOME/.local/state/vannak}. If the segment already exists, startup uses
 \texttt{VannakService::recover\_after} and reopens the validated segment for
 append; otherwise it creates a new segment. \texttt{--journal} behaves the same
 way for the process-event journal: an existing segment is replayed into the hot
@@ -133,13 +135,25 @@ service and the local control state. At startup the supervisor also grants the
 local node a writer lease for each configured placement target, so the optional
 background writer can drain only targets it is authorized to write.
 
-\texttt{--with-ipto} starts the background writer with \texttt{IptoRepoWriter}.
+\texttt{--max-request-body-bytes} caps accepted \texttt{POST} request bodies
+for \texttt{/ingest} and \texttt{/query}. The default is \texttt{1048576}
+bytes. Oversized requests receive \texttt{413 Payload Too Large}.
+
+\texttt{--with-ipto} tries to start the background writer with
+\texttt{IptoRepoWriter}.
 The writer reads the \texttt{IPTO\_PG\_*} environment variables above,
 configures the built-in PROV-O SDL, and drains pending outbox entries according
-to \texttt{--writer-interval}. Without \texttt{--with-ipto}, the daemon still
-serves health, ingest, and query requests, but no concrete \ipto{} writer is
-started. \texttt{--ipto-tenant} selects the tenant id for the writer and
-defaults to \texttt{1}.
+to \texttt{--writer-interval}. If writer initialization fails, the default is
+degraded startup: the daemon continues serving health, ingest, and query
+requests without a concrete \ipto{} writer. Add \texttt{--require-ipto} to make
+that initialization failure abort startup. Without \texttt{--with-ipto}, no
+concrete \ipto{} writer is started. \texttt{--ipto-tenant} selects the tenant id
+for the writer and defaults to \texttt{1}.
+
+The supervisor installs a shutdown signal handler. On Unix it listens for
+\texttt{SIGINT} and \texttt{SIGTERM}; on other platforms it listens for
+Ctrl-C. The handler sets the shared stop token used by the daemon HTTP server,
+the background writer, the Raft listener loop, and the Kafka consumer loop.
 
 \subsection{The PROV-O SDL Schema}
 

@@ -235,8 +235,9 @@ discovers existing segment files at startup, recovers existing metadata outbox
 and process-event journal segments for append, initializes its local control
 state from the same placement map used by the service, and can start a
 PostgreSQL-backed background Ipto writer with `--with-ipto` when built with
-`ipto-writer`. Checkpoint publication remains a control-plane integration
-concern.
+`ipto-writer`. The supervisor handles Ctrl-C/SIGTERM by setting the shared
+daemon, Raft, Kafka, and writer stop token. Background writer drains publish
+acknowledged metadata outbox checkpoints into the local control state.
 
 ## Supervisor Daemon
 
@@ -251,15 +252,21 @@ pass `--with-ipto`:
 
 ```bash
 cargo build --features node,daemon,ipto-writer --bin vannak
-target/debug/vannak --outbox /tmp/vannak/metadata-outbox.seg default-outbox vannak \
-  --journal /tmp/vannak/process-events.seg \
+target/debug/vannak --outbox ~/.local/state/vannak/metadata-outbox.seg default-outbox vannak \
+  --journal ~/.local/state/vannak/process-events.seg \
   --with-ipto --ipto-tenant 1
 ```
 
 If the configured outbox or journal file already exists, the supervisor
 validates and reopens it for append. The HTTP daemon parses `/ingest` and
 `/query` bodies as JSON and rejects unknown event kinds or process statuses
-instead of silently defaulting them.
+instead of silently defaulting them. When the background writer is enabled,
+`/health` reports live writer cycles and totals while the loop is running. If
+`--outbox` is omitted, the default path is under the Raft data directory when
+Raft is configured, otherwise under `$HOME/.local/state/vannak`. The HTTP server
+rejects POST bodies larger than `--max-request-body-bytes` (default 1 MiB).
+`--with-ipto` starts in degraded mode if the writer cannot initialize; add
+`--require-ipto` to fail startup instead.
 
 ## Crate Layout
 

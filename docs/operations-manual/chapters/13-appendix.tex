@@ -229,7 +229,7 @@ summaries are owned values.
 \texttt{daemon.rs} provides an HTTP health endpoint (\texttt{start\_health\_server},
 \texttt{Daemon::serve\_health}) exposing JSON snapshots of the hot index,
 metadata outbox, provenance index, placement epoch, process-event journal, and
-background writer state at \texttt{/health}. \\
+live background writer state at \texttt{/health}. \\
 
 Load generator & Test/runbook &
 \texttt{vannak-load} simulates process and metadata events in-process; with
@@ -242,9 +242,12 @@ for concurrent HTTP and background access. \texttt{start\_health\_server} serves
 JSON snapshots via \texttt{/health}, accepts process events via
 \texttt{POST /ingest}, and answers typed queries via \texttt{POST /query}.
 \texttt{run\_background\_writer} runs a timer-driven outbox drain loop with
-lease checks, writing through an \texttt{IptoWriter}. \texttt{discover\_segments}
-scans a directory for \texttt{.seg} files, validates magic, and returns
-manifests. \\
+lease checks, writing through an \texttt{IptoWriter}, publishing live health
+snapshots, and recording acknowledged outbox checkpoints in the local control
+state. \texttt{discover\_segments} scans a directory for \texttt{.seg} files,
+validates magic, and returns manifests. \texttt{Daemon::new\_with\_stop\_token}
+lets the supervisor share a single shutdown token across the HTTP server and
+background loops. \\
 \end{longtable}
 
 \subsection{CLI Reference}
@@ -255,7 +258,8 @@ The \texttt{vannak} binary (built with \texttt{node} + \texttt{daemon}) starts
 the Raft control plane, the daemon service plane, and optionally the Kafka
 consumer in a single supervised process. Add \texttt{ipto-writer} and
 \shellcmd{--with-ipto} when the process should also run the concrete
-PostgreSQL-backed \ipto{} writer.
+PostgreSQL-backed \ipto{} writer. The supervisor handles Ctrl-C/SIGTERM by
+setting the shared daemon, Raft, Kafka, and writer stop token.
 
 \begin{table}[htbp]
 \centering
@@ -269,8 +273,10 @@ Option & Effect \\
 \shellcmd{--health <bind-addr>} & health/query HTTP server bind address (default \texttt{127.0.0.1:9090}) \\
 \shellcmd{--outbox <path> <seg-id> <node-id>} & metadata outbox segment path and identity \\
 \shellcmd{--journal <path>} & process-event journal segment path \\
+\shellcmd{--max-request-body-bytes <bytes>} & maximum \texttt{POST} body size (default 1048576) \\
 \shellcmd{--writer-interval <secs>} & background writer drain interval (default 5) \\
-\shellcmd{--with-ipto} & start \texttt{IptoRepoWriter} background drains (requires \texttt{ipto-writer}) \\
+\shellcmd{--with-ipto} & try to start \texttt{IptoRepoWriter} background drains (requires \texttt{ipto-writer}) \\
+\shellcmd{--require-ipto} & fail startup if \shellcmd{--with-ipto} cannot initialize the writer \\
 \shellcmd{--ipto-tenant <id>} & \ipto{} tenant id for \shellcmd{--with-ipto} (default 1) \\
 \shellcmd{--placement <epoch> <target> <vnodes> ...} & Ipto placement map \\
 \hline

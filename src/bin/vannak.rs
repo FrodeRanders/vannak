@@ -95,16 +95,7 @@ fn run() -> Result<(), String> {
     let config = parse_args(&args)?;
 
     let stop_token = Arc::new(AtomicBool::new(false));
-
-    // -- signal handler for graceful shutdown --
-    {
-        let stop = stop_token.clone();
-        std::thread::spawn(move || {
-            // Simple: just wait for stdin close or park
-            std::thread::park();
-            stop.store(true, Ordering::Relaxed);
-        });
-    }
+    spawn_shutdown_signal_handler(stop_token.clone());
 
     // -- placement map --
     let placement = config.placement.clone().unwrap_or_else(|| {
@@ -124,13 +115,10 @@ fn run() -> Result<(), String> {
 
     // -- outbox --
     let (outbox_path, outbox_segment_id, outbox_node_id) = {
-        let path = config.outbox_path.clone().unwrap_or_else(|| {
-            let dir = std::env::temp_dir().join("vannak");
-            let _ = std::fs::create_dir_all(&dir);
-            dir.join("metadata-outbox.seg")
-                .to_string_lossy()
-                .to_string()
-        });
+        let path = config
+            .outbox_path
+            .clone()
+            .unwrap_or_else(|| default_outbox_path(&config));
         let seg_id = config
             .outbox_segment_id
             .clone()
@@ -216,13 +204,19 @@ fn run() -> Result<(), String> {
             .health_bind_address
             .unwrap_or_else(|| String::from("127.0.0.1:9090")),
         read_timeout: Duration::from_secs(10),
+        max_request_body_bytes: config.max_request_body_bytes,
     };
     let writer_config = BackgroundWriterConfig {
         interval: Duration::from_secs(config.writer_interval_secs),
         max_drain_attempts_per_target: 100,
         verbose: false,
     };
-    let daemon = Daemon::new(svc, daemon_config.clone(), writer_config);
+    let daemon = Daemon::new_with_stop_token(
+        svc,
+        daemon_config.clone(),
+        writer_config,
+        stop_token.clone(),
+    );
 
     // -- control state (shared between raft and daemon) --
     let control_state = Arc::new(Mutex::new(ClusterControlState::new()));
@@ -259,16 +253,25 @@ fn run() -> Result<(), String> {
             let backend: Arc<dyn Backend> = Arc::new(PostgresBackend::new());
             let repo = Arc::new(RepoService::new(backend));
             let mut writer = IptoRepoWriter::new(repo, config.ipto_tenant_id);
-            writer.configure_sdl().map_err(|e| e.to_string())?;
-            writer_snapshot = daemon.start_background_writer(
-                control_state.clone(),
-                outbox_node_id.clone(),
-                Arc::new(Mutex::new(writer)),
-            );
-            eprintln!(
-                "vannak: background Ipto writer enabled for tenant {}",
-                config.ipto_tenant_id
-            );
+            match writer.configure_sdl() {
+                Ok(()) => {
+                    writer_snapshot = daemon.start_background_writer(
+                        control_state.clone(),
+                        outbox_node_id.clone(),
+                        Arc::new(Mutex::new(writer)),
+                    );
+                    eprintln!(
+                        "vannak: background Ipto writer enabled for tenant {}",
+                        config.ipto_tenant_id
+                    );
+                }
+                Err(error) if config.require_ipto => return Err(error.to_string()),
+                Err(error) => {
+                    eprintln!(
+                        "vannak: Ipto writer disabled after startup failure: {error}; use --require-ipto to fail instead"
+                    );
+                }
+            }
         }
         #[cfg(not(feature = "ipto-writer"))]
         return Err("--with-ipto requires the ipto-writer feature".to_string());
@@ -314,7 +317,7 @@ fn run() -> Result<(), String> {
 // CLI config parsing
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SupervisorConfig {
     raft: Option<RaftArgs>,
     kafka: Option<KafkaArgs>,
@@ -327,6 +330,28 @@ struct SupervisorConfig {
     placement: Option<IptoPlacementMap>,
     with_ipto: bool,
     ipto_tenant_id: i64,
+    require_ipto: bool,
+    max_request_body_bytes: usize,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        Self {
+            raft: None,
+            kafka: None,
+            health_bind_address: None,
+            outbox_path: None,
+            outbox_segment_id: None,
+            outbox_node_id: None,
+            process_journal_path: None,
+            writer_interval_secs: 5,
+            placement: None,
+            with_ipto: false,
+            ipto_tenant_id: 1,
+            require_ipto: false,
+            max_request_body_bytes: 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -350,7 +375,6 @@ struct KafkaArgs {
 
 fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
     let mut config = SupervisorConfig::default();
-    config.ipto_tenant_id = 1;
     let mut idx = 0usize;
 
     while idx < args.len() {
@@ -458,6 +482,10 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 config.with_ipto = true;
                 idx += 1;
             }
+            "--require-ipto" => {
+                config.require_ipto = true;
+                idx += 1;
+            }
             "--ipto-tenant" => {
                 if idx + 1 >= args.len() {
                     return Err(usage());
@@ -465,6 +493,15 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 config.ipto_tenant_id = args[idx + 1]
                     .parse()
                     .map_err(|_| "invalid Ipto tenant id")?;
+                idx += 2;
+            }
+            "--max-request-body-bytes" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage());
+                }
+                config.max_request_body_bytes = args[idx + 1]
+                    .parse()
+                    .map_err(|_| "invalid max request body size")?;
                 idx += 2;
             }
             "--placement" => {
@@ -628,6 +665,79 @@ fn response_type_for(request_type: &str) -> String {
     } else {
         format!("{request_type}Response")
     }
+}
+
+fn default_outbox_path(config: &SupervisorConfig) -> String {
+    let dir = config
+        .raft
+        .as_ref()
+        .map(|raft| std::path::PathBuf::from(&raft.data_dir).join("vannak"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                std::path::PathBuf::from(home)
+                    .join(".local")
+                    .join("state")
+                    .join("vannak")
+            })
+        })
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| ".".into())
+                .join("vannak")
+        });
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("metadata-outbox.seg")
+        .to_string_lossy()
+        .to_string()
+}
+
+fn spawn_shutdown_signal_handler(stop_token: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let Ok(rt) = Runtime::new() else {
+            eprintln!("vannak: failed to install shutdown signal handler");
+            return;
+        };
+
+        #[cfg(unix)]
+        rt.block_on(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+
+            let mut interrupt = match signal(SignalKind::interrupt()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    eprintln!("vannak: failed to listen for SIGINT: {error}");
+                    return;
+                }
+            };
+            let mut terminate = match signal(SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    eprintln!("vannak: failed to listen for SIGTERM: {error}");
+                    return;
+                }
+            };
+
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+            }
+            eprintln!("vannak: shutdown signal received");
+            stop_token.store(true, Ordering::Relaxed);
+        });
+
+        #[cfg(not(unix))]
+        rt.block_on(async move {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => {
+                    eprintln!("vannak: shutdown signal received");
+                    stop_token.store(true, Ordering::Relaxed);
+                }
+                Err(error) => {
+                    eprintln!("vannak: failed to listen for Ctrl-C: {error}");
+                }
+            }
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -826,13 +936,17 @@ Options:
   --health <bind-addr>
       Health/query HTTP server bind address (default: 127.0.0.1:9090)
   --outbox <segment-path> <segment-id> <node-id>
-      Metadata outbox segment path and identity
+      Metadata outbox segment path and identity (default: data-dir/vannak or ~/.local/state/vannak)
   --journal <path>
       Process event journal segment path
+  --max-request-body-bytes <bytes>
+      Maximum accepted POST body size (default: 1048576)
   --writer-interval <secs>
       Background writer drain interval in seconds (default: 5)
   --with-ipto
-      Start the PostgreSQL-backed Ipto writer (requires ipto-writer feature)
+      Try to start the PostgreSQL-backed Ipto writer (requires ipto-writer feature)
+  --require-ipto
+      Fail startup if --with-ipto cannot initialize the Ipto writer
   --ipto-tenant <id>
       Ipto tenant id for --with-ipto (default: 1)
   --placement <epoch> <target> <vnodes> [<target> <vnodes> ...]

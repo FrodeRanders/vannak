@@ -128,7 +128,9 @@ address (default \texttt{127.0.0.1:9090}) and exposes two endpoints:
   rejected\_events), \texttt{outbox} (total, pending, acknowledged, failed),
   \texttt{provenance} (metadata\_event\_count), \texttt{placement\_epoch},
   optional \texttt{process\_event\_journal} manifest, and optional
-  \texttt{background\_writer} (cycles, total\_acknowledged, total\_failed).
+  \texttt{background\_writer} (cycles, current\_cycle,
+  total\_acknowledged, total\_failed). When the writer is enabled, this snapshot
+  is updated by the writer loop every cycle rather than only at shutdown.
 
 \item[\texttt{POST /query}] Accepts a JSON query body and returns a JSON
   \texttt{QueryResult}. Supported query types:
@@ -146,7 +148,10 @@ address (default \texttt{127.0.0.1:9090}) and exposes two endpoints:
   \texttt{activity\_id}. The daemon parses request bodies with
   \texttt{serde\_json}; malformed JSON, missing required fields, unknown event
   kinds, and unknown process statuses are rejected with \texttt{400 Bad Request}
-  instead of being silently defaulted.
+  instead of being silently defaulted. Bodies larger than
+  \texttt{max\_request\_body\_bytes} (configured by
+  \shellcmd{--max-request-body-bytes}) are rejected with
+  \texttt{413 Payload Too Large}.
 \end{description}
 
 The \texttt{vannak} supervisor binary starts both the Raft transport listener

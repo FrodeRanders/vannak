@@ -22,7 +22,7 @@
 //! server and `std::thread` for the background writer loop. The dependency-free
 //! core modules remain usable without this.
 
-use crate::cluster::{ClusterControlState, NodeId};
+use crate::cluster::{CheckpointEpoch, ClusterControlCommand, ClusterControlState, NodeId};
 use crate::ipto::{IptoWriter, MetadataOutboxDrainSummary};
 use crate::service::{VannakService, VannakServiceError, VannakServiceSnapshot};
 use crate::storage::{SegmentError, SegmentManifest};
@@ -283,10 +283,31 @@ pub fn run_background_writer(
     config: BackgroundWriterConfig,
     stop_token: Arc<AtomicBool>,
 ) -> BackgroundWriterSnapshot {
+    run_background_writer_with_updates(
+        service,
+        control_state,
+        node_id,
+        writer,
+        config,
+        stop_token,
+        None,
+    )
+}
+
+fn run_background_writer_with_updates(
+    service: Arc<Mutex<VannakService>>,
+    control_state: Arc<Mutex<ClusterControlState>>,
+    node_id: NodeId,
+    writer: Arc<Mutex<dyn IptoWriter + Send>>,
+    config: BackgroundWriterConfig,
+    stop_token: Arc<AtomicBool>,
+    live_snapshot: Option<Arc<Mutex<Option<BackgroundWriterSnapshot>>>>,
+) -> BackgroundWriterSnapshot {
     let mut snapshot = BackgroundWriterSnapshot::default();
 
     while !stop_token.load(Ordering::Relaxed) {
         snapshot.cycles += 1;
+        snapshot.current_cycle = Some(snapshot.cycles);
 
         let targets: Vec<_> = {
             let control = control_state.lock().unwrap();
@@ -299,7 +320,7 @@ pub fn run_background_writer(
         let mut cycle_summaries = Vec::new();
         for target in &targets {
             let mut svc = service.lock().unwrap();
-            let control = control_state.lock().unwrap();
+            let mut control = control_state.lock().unwrap();
             let mut w = writer.lock().unwrap();
 
             match svc.drain_metadata_for_target_if_lease_held(
@@ -312,6 +333,16 @@ pub fn run_background_writer(
                 Ok(summary) if !summary.is_empty() => {
                     snapshot.total_acknowledged += summary.acknowledged;
                     snapshot.total_failed += summary.failed;
+                    if summary.acknowledged > 0 {
+                        let checkpoints = svc.acknowledged_checkpoints_for_target(
+                            target,
+                            CheckpointEpoch(snapshot.cycles),
+                        );
+                        for checkpoint in checkpoints {
+                            let _ = control
+                                .apply(ClusterControlCommand::RecordOutboxCheckpoint(checkpoint));
+                        }
+                    }
                     cycle_summaries.push((target.clone(), summary));
                 }
                 Ok(_) => {}
@@ -323,10 +354,16 @@ pub fn run_background_writer(
         if !cycle_summaries.is_empty() {
             snapshot.last_summary = Some(cycle_summaries);
         }
+        if let Some(ref live_snapshot) = live_snapshot {
+            *live_snapshot.lock().unwrap() = Some(snapshot.clone());
+        }
         std::thread::sleep(config.interval);
     }
 
     snapshot.current_cycle = Some(snapshot.cycles);
+    if let Some(ref live_snapshot) = live_snapshot {
+        *live_snapshot.lock().unwrap() = Some(snapshot.clone());
+    }
     snapshot
 }
 
@@ -341,6 +378,8 @@ pub struct DaemonConfig {
     pub bind_address: String,
     /// Read timeout for client requests.
     pub read_timeout: Duration,
+    /// Maximum accepted request body size for POST endpoints.
+    pub max_request_body_bytes: usize,
 }
 
 impl Default for DaemonConfig {
@@ -348,6 +387,7 @@ impl Default for DaemonConfig {
         Self {
             bind_address: String::from("127.0.0.1:9090"),
             read_timeout: Duration::from_secs(10),
+            max_request_body_bytes: 1024 * 1024,
         }
     }
 }
@@ -391,8 +431,9 @@ pub fn start_health_server(
                 let svc = service.clone();
                 let bw = background_writer_snapshot.clone();
                 let uptime = start_time;
+                let request_config = config.clone();
                 std::thread::spawn(move || {
-                    handle_health_request(stream, &svc, &bw, uptime);
+                    handle_health_request(stream, &svc, &bw, &request_config, uptime);
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -409,8 +450,10 @@ fn handle_health_request(
     mut stream: TcpStream,
     service: &Arc<Mutex<VannakService>>,
     background_writer: &Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
+    config: &DaemonConfig,
     start_time: Instant,
 ) {
+    let _ = stream.set_read_timeout(Some(config.read_timeout));
     let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| unreachable!()));
 
     let mut request_line = String::new();
@@ -436,42 +479,30 @@ fn handle_health_request(
     let _ = stream.set_nonblocking(false);
 
     if request_line.starts_with("POST /ingest") {
-        let mut body = String::new();
-        if let Some(len) = content_length {
-            let mut buf = vec![0u8; len];
-            use std::io::Read;
-            if reader.read_exact(&mut buf).is_ok() {
-                body = String::from_utf8_lossy(&buf).to_string();
+        let body = match read_request_body(&mut reader, content_length, config) {
+            Ok(body) => body,
+            Err((status, body)) => {
+                write_json_response(&mut stream, status, &body);
+                return;
             }
-        }
+        };
 
         let (status, result_json) = handle_ingest_request(service, &body);
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{result_json}",
-            result_json.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+        write_json_response(&mut stream, status, &result_json);
         return;
     }
 
     if request_line.starts_with("POST /query") {
-        let mut body = String::new();
-        if let Some(len) = content_length {
-            let mut buf = vec![0u8; len];
-            use std::io::Read;
-            if reader.read_exact(&mut buf).is_ok() {
-                body = String::from_utf8_lossy(&buf).to_string();
+        let body = match read_request_body(&mut reader, content_length, config) {
+            Ok(body) => body,
+            Err((status, body)) => {
+                write_json_response(&mut stream, status, &body);
+                return;
             }
-        }
+        };
 
         let (status, result_json) = handle_query_request(service, &body);
-        let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{result_json}",
-            result_json.len()
-        );
-        let _ = stream.write_all(response.as_bytes());
-        let _ = stream.flush();
+        write_json_response(&mut stream, status, &result_json);
         return;
     }
 
@@ -487,11 +518,38 @@ fn handle_health_request(
         r#"{"error":"not found"}"#.to_string()
     };
 
+    write_json_response(&mut stream, status, &body);
+}
+
+fn read_request_body(
+    reader: &mut BufReader<TcpStream>,
+    content_length: Option<usize>,
+    config: &DaemonConfig,
+) -> Result<String, (&'static str, String)> {
+    let Some(len) = content_length else {
+        return Ok(String::new());
+    };
+    if len > config.max_request_body_bytes {
+        return Err((
+            "413 Payload Too Large",
+            r#"{"error":"request body too large"}"#.to_string(),
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).map_err(|_| {
+        (
+            "400 Bad Request",
+            r#"{"error":"failed to read request body"}"#.to_string(),
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+fn write_json_response(stream: &mut TcpStream, status: &str, body: &str) {
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
 }
@@ -1339,12 +1397,26 @@ impl Daemon {
         config: DaemonConfig,
         writer_config: BackgroundWriterConfig,
     ) -> Self {
+        Self::new_with_stop_token(
+            service,
+            config,
+            writer_config,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    pub fn new_with_stop_token(
+        service: VannakService,
+        config: DaemonConfig,
+        writer_config: BackgroundWriterConfig,
+        stop_token: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             service: Arc::new(Mutex::new(service)),
             config,
             writer_config,
             start_time: Instant::now(),
-            stop_token: Arc::new(AtomicBool::new(false)),
+            stop_token,
         }
     }
 
@@ -1371,8 +1443,15 @@ impl Daemon {
         let stop_token = self.stop_token.clone();
 
         std::thread::spawn(move || {
-            let snapshot =
-                run_background_writer(service, control_state, node_id, writer, config, stop_token);
+            let snapshot = run_background_writer_with_updates(
+                service,
+                control_state,
+                node_id,
+                writer,
+                config,
+                stop_token,
+                Some(bw_snapshot_clone.clone()),
+            );
             *bw_snapshot_clone.lock().unwrap() = Some(snapshot);
         });
 
@@ -1530,6 +1609,54 @@ mod tests {
         assert!(json.contains("\"placement_epoch\""));
     }
 
+    #[test]
+    fn health_server_rejects_oversized_post_body() {
+        let dir = tempdir();
+        let path = dir.join("health-body-limit.seg");
+        let svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1"),
+            &path,
+            SegmentId::from("health-body-limit-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = Arc::new(Mutex::new(svc));
+        let bw: Arc<Mutex<Option<BackgroundWriterSnapshot>>> = Arc::new(Mutex::new(None));
+        let config = DaemonConfig {
+            max_request_body_bytes: 8,
+            ..DaemonConfig::default()
+        };
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_health_request(stream, &service, &bw, &config, Instant::now());
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(
+                b"POST /ingest HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16\r\n\r\n0123456789abcdef",
+            )
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+        assert!(response.contains("request body too large"));
+    }
+
     // -- daemon lifecycle --
 
     #[test]
@@ -1563,6 +1690,36 @@ mod tests {
         assert!(snap.service.hot_index.event_count == 0);
 
         daemon.stop();
+        assert!(daemon.is_stopping());
+    }
+
+    #[test]
+    fn daemon_can_share_external_stop_token() {
+        let dir = tempdir();
+        let path = dir.join("daemon-stop-token.seg");
+        let svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1"),
+            &path,
+            SegmentId::from("daemon-stop-token-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+        let stop_token = Arc::new(AtomicBool::new(false));
+        let daemon = Daemon::new_with_stop_token(
+            svc,
+            DaemonConfig::default(),
+            BackgroundWriterConfig::default(),
+            stop_token.clone(),
+        );
+
+        stop_token.store(true, Ordering::Relaxed);
+
         assert!(daemon.is_stopping());
     }
 
@@ -1631,6 +1788,150 @@ mod tests {
 
         assert_eq!(summary.acknowledged, 1);
         assert_eq!(recording.written, 1);
+    }
+
+    #[test]
+    fn background_writer_publishes_live_snapshot() {
+        let dir = tempdir();
+        let path = dir.join("bg-live-snapshot.seg");
+        let svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1"),
+            &path,
+            SegmentId::from("bg-live-snapshot-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+        let daemon = Daemon::new(
+            svc,
+            DaemonConfig::default(),
+            BackgroundWriterConfig {
+                interval: Duration::from_millis(10),
+                max_drain_attempts_per_target: 1,
+                verbose: false,
+            },
+        );
+        let control_state = Arc::new(Mutex::new(ClusterControlState::new()));
+        let writer: Arc<Mutex<dyn IptoWriter + Send>> =
+            Arc::new(Mutex::new(RecordingWriter::default()));
+        let snapshot =
+            daemon.start_background_writer(control_state, NodeId::from("node-a"), writer);
+
+        for _ in 0..50 {
+            if snapshot.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let live = snapshot.lock().unwrap().clone();
+        daemon.stop();
+
+        assert!(live.is_some());
+        assert!(live.unwrap().cycles > 0);
+    }
+
+    #[test]
+    fn background_writer_records_acknowledged_checkpoints() {
+        let dir = tempdir();
+        let path = dir.join("bg-checkpoint.seg");
+        let target = IptoInstanceId::from("ipto-a");
+        let mut svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(target.clone(), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1").map_field("vannak:dataIndividualId", "vannak:dataIndividualId"),
+            &path,
+            SegmentId::from("bg-checkpoint-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let event = DataIndividualMetadataEvent::new(
+            MetadataEventId::from("meta-checkpoint"),
+            DataIndividualId::from("data-checkpoint"),
+            crate::data::DataIndividualShardId::from_data_individual(&DataIndividualId::from(
+                "data-checkpoint",
+            )),
+            TenantId::from("tenant-a"),
+            EnvironmentId::from("prod"),
+            PipelineId::from("pipeline-a"),
+            ProcessInstanceId::from("instance-a"),
+            EventTimestamp::from("2026-06-30T12:00:00Z"),
+            MetadataOperation::Received,
+        )
+        .with_passive_metadata(PassiveMetadata::new().insert(
+            "vannak:dataIndividualId",
+            MetadataValue::string("data-checkpoint"),
+        ));
+        let shard_id = event.data_individual_shard_id();
+        svc.capture_metadata_event(&event).unwrap();
+
+        let daemon = Daemon::new(
+            svc,
+            DaemonConfig::default(),
+            BackgroundWriterConfig {
+                interval: Duration::from_millis(10),
+                max_drain_attempts_per_target: 10,
+                verbose: false,
+            },
+        );
+        let control_state = Arc::new(Mutex::new(ClusterControlState::new()));
+        {
+            let mut control = control_state.lock().unwrap();
+            control
+                .apply(ClusterControlCommand::AddNode(NodeId::from("node-a")))
+                .unwrap();
+            control
+                .apply(ClusterControlCommand::SetIptoPlacementMap(
+                    IptoPlacementMap::new(
+                        PlacementEpoch(1),
+                        vec![IptoPlacementSlot::new(target.clone(), 1).unwrap()],
+                        vec![],
+                    )
+                    .unwrap(),
+                ))
+                .unwrap();
+            control
+                .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
+                    target: target.clone(),
+                    holder: NodeId::from("node-a"),
+                    epoch: LeaseEpoch(1),
+                }))
+                .unwrap();
+        }
+        let writer: Arc<Mutex<dyn IptoWriter + Send>> =
+            Arc::new(Mutex::new(RecordingWriter::default()));
+        let snapshot =
+            daemon.start_background_writer(control_state.clone(), NodeId::from("node-a"), writer);
+
+        for _ in 0..50 {
+            if snapshot
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.total_acknowledged > 0)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        daemon.stop();
+
+        let control = control_state.lock().unwrap();
+        assert!(
+            control
+                .outbox_checkpoint(shard_id, &target)
+                .is_some_and(|checkpoint| checkpoint.last_acknowledged_offset.0 > 0)
+        );
     }
 
     #[test]

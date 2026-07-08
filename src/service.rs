@@ -222,6 +222,15 @@ impl VannakService {
             .acknowledged_checkpoint(shard_id, target, epoch)
     }
 
+    pub fn acknowledged_checkpoints_for_target(
+        &self,
+        target: &IptoInstanceId,
+        epoch: CheckpointEpoch,
+    ) -> Vec<MetadataOutboxCheckpoint> {
+        self.metadata_outbox
+            .acknowledged_checkpoints_for_target(target, epoch)
+    }
+
     pub fn snapshot(&self) -> VannakServiceSnapshot {
         VannakServiceSnapshot {
             hot_index: self.hot_index.snapshot(),

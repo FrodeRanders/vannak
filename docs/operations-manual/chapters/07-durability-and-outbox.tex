@@ -211,6 +211,11 @@ pub struct MetadataOutboxReplaySummary {
 a given target. This checkpoint can then be proposed through the cluster control
 plane so a recovering node can replay only the records after it.
 
+The daemon background writer records these checkpoints into the local
+\texttt{ClusterControlState} after a successful target drain. Each checkpoint is
+scoped by \texttt{DataIndividualShardId} and \texttt{IptoInstanceId}; repeated
+records are fenced by \texttt{CheckpointEpoch}.
+
 \subsection{Outbox Checkpoint Data}
 
 \begin{lstlisting}

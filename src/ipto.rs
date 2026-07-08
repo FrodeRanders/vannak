@@ -423,6 +423,47 @@ impl MetadataOutbox {
                 },
             )
     }
+
+    fn acknowledged_checkpoints_for_target(
+        &self,
+        target: &IptoInstanceId,
+        segment_id: SegmentId,
+        epoch: CheckpointEpoch,
+    ) -> Vec<MetadataOutboxCheckpoint> {
+        let mut latest: BTreeMap<DataIndividualShardId, (RecordOffset, String)> = BTreeMap::new();
+
+        for entry in self.entries.values().filter(|entry| {
+            entry.status == OutboxStatus::Acknowledged && entry.payload.target == *target
+        }) {
+            let Some(offset) = entry.record_offset else {
+                continue;
+            };
+            let key = entry.payload.shard_id;
+            let value = (offset, entry.payload.mapping_version.clone());
+            if latest
+                .get(&key)
+                .is_none_or(|(current_offset, _)| offset > *current_offset)
+            {
+                latest.insert(key, value);
+            }
+        }
+
+        latest
+            .into_iter()
+            .map(
+                |(data_individual_shard_id, (last_acknowledged_offset, mapping_version))| {
+                    MetadataOutboxCheckpoint {
+                        data_individual_shard_id,
+                        target: target.clone(),
+                        segment_id: segment_id.clone(),
+                        last_acknowledged_offset,
+                        mapping_version,
+                        epoch,
+                    }
+                },
+            )
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -724,6 +765,18 @@ impl SegmentBackedMetadataOutbox {
     ) -> Option<MetadataOutboxCheckpoint> {
         self.outbox.acknowledged_checkpoint(
             data_individual_shard_id,
+            target,
+            self.writer.manifest().segment_id,
+            epoch,
+        )
+    }
+
+    pub fn acknowledged_checkpoints_for_target(
+        &self,
+        target: &IptoInstanceId,
+        epoch: CheckpointEpoch,
+    ) -> Vec<MetadataOutboxCheckpoint> {
+        self.outbox.acknowledged_checkpoints_for_target(
             target,
             self.writer.manifest().segment_id,
             epoch,
