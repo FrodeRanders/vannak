@@ -118,7 +118,8 @@ fn run() -> Result<(), String> {
         let path = config
             .outbox_path
             .clone()
-            .unwrap_or_else(|| default_outbox_path(&config));
+            .map(Ok)
+            .unwrap_or_else(|| default_outbox_path(&config))?;
         let seg_id = config
             .outbox_segment_id
             .clone()
@@ -308,7 +309,9 @@ fn run() -> Result<(), String> {
 
     // -- health server (blocks main thread until stop) --
     eprintln!("vannak: health endpoint on {}", daemon_config.bind_address);
-    daemon.serve_health(writer_snapshot);
+    daemon
+        .serve_health(writer_snapshot)
+        .map_err(|e| format!("health server failed: {e}"))?;
 
     Ok(())
 }
@@ -476,6 +479,9 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 }
                 config.writer_interval_secs =
                     args[idx + 1].parse().map_err(|_| "invalid interval")?;
+                if config.writer_interval_secs == 0 {
+                    return Err("--writer-interval must be greater than zero".to_string());
+                }
                 idx += 2;
             }
             "--with-ipto" => {
@@ -502,29 +508,55 @@ fn parse_args(args: &[String]) -> Result<SupervisorConfig, String> {
                 config.max_request_body_bytes = args[idx + 1]
                     .parse()
                     .map_err(|_| "invalid max request body size")?;
+                if config.max_request_body_bytes == 0 {
+                    return Err("--max-request-body-bytes must be greater than zero".to_string());
+                }
                 idx += 2;
             }
             "--placement" => {
                 idx += 1;
-                let epoch: u64 = args.get(idx).and_then(|s| s.parse().ok()).unwrap_or(1);
+                let Some(epoch_arg) = args.get(idx) else {
+                    return Err(
+                        "--placement requires an epoch and at least one target/vnodes pair"
+                            .to_string(),
+                    );
+                };
+                if epoch_arg.starts_with("--") {
+                    return Err(
+                        "--placement requires an epoch and at least one target/vnodes pair"
+                            .to_string(),
+                    );
+                }
+                let epoch: u64 = epoch_arg.parse().map_err(|_| "invalid placement epoch")?;
                 idx += 1;
                 let mut slots = Vec::new();
                 while idx + 1 < args.len() && !args[idx].starts_with("--") {
+                    if args[idx + 1].starts_with("--") {
+                        return Err("--placement target is missing a vnodes value".to_string());
+                    }
                     let target = IptoInstanceId::from(args[idx].clone());
                     let vnodes: u32 = args[idx + 1].parse().map_err(|_| "invalid vnodes")?;
                     slots.push(IptoPlacementSlot::new(target, vnodes).map_err(|e| e.to_string())?);
                     idx += 2;
                 }
-                if !slots.is_empty() {
-                    config.placement = Some(
-                        IptoPlacementMap::new(PlacementEpoch(epoch), slots, vec![])
-                            .map_err(|e| e.to_string())?,
-                    );
+                if slots.is_empty() {
+                    return Err("--placement requires at least one target/vnodes pair".to_string());
                 }
+                if idx < args.len() && !args[idx].starts_with("--") {
+                    return Err("--placement requires complete target/vnodes pairs".to_string());
+                }
+                config.placement = Some(
+                    IptoPlacementMap::new(PlacementEpoch(epoch), slots, vec![])
+                        .map_err(|e| e.to_string())?,
+                );
             }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
             _ => idx += 1,
         }
+    }
+
+    if config.require_ipto && !config.with_ipto {
+        return Err("--require-ipto requires --with-ipto".to_string());
     }
 
     Ok(config)
@@ -667,7 +699,7 @@ fn response_type_for(request_type: &str) -> String {
     }
 }
 
-fn default_outbox_path(config: &SupervisorConfig) -> String {
+fn default_outbox_path(config: &SupervisorConfig) -> Result<String, String> {
     let dir = config
         .raft
         .as_ref()
@@ -685,10 +717,12 @@ fn default_outbox_path(config: &SupervisorConfig) -> String {
                 .unwrap_or_else(|_| ".".into())
                 .join("vannak")
         });
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("metadata-outbox.seg")
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("failed to create outbox directory {}: {e}", dir.display()))?;
+    Ok(dir
+        .join("metadata-outbox.seg")
         .to_string_lossy()
-        .to_string()
+        .to_string())
 }
 
 fn spawn_shutdown_signal_handler(stop_token: Arc<AtomicBool>) {
@@ -953,4 +987,46 @@ Options:
       Ipto placement map (default: single ipto-default with 1 vnode)
 "#
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_rejects_zero_writer_interval() {
+        let error = parse_args(&args(&["--writer-interval", "0"])).unwrap_err();
+        assert!(error.contains("--writer-interval"));
+    }
+
+    #[test]
+    fn parse_args_rejects_zero_request_body_limit() {
+        let error = parse_args(&args(&["--max-request-body-bytes", "0"])).unwrap_err();
+        assert!(error.contains("--max-request-body-bytes"));
+    }
+
+    #[test]
+    fn parse_args_rejects_require_ipto_without_with_ipto() {
+        let error = parse_args(&args(&["--require-ipto"])).unwrap_err();
+        assert!(error.contains("--require-ipto requires --with-ipto"));
+    }
+
+    #[test]
+    fn parse_args_rejects_empty_or_odd_placement() {
+        let empty = parse_args(&args(&["--placement", "1"])).unwrap_err();
+        assert!(empty.contains("--placement requires at least one"));
+
+        let odd = parse_args(&args(&["--placement", "1", "ipto-a"])).unwrap_err();
+        assert!(odd.contains("--placement"));
+    }
+
+    #[test]
+    fn parse_args_accepts_valid_placement() {
+        let config = parse_args(&args(&["--placement", "7", "ipto-a", "2"])).unwrap();
+        assert_eq!(config.placement.unwrap().epoch, PlacementEpoch(7));
+    }
 }

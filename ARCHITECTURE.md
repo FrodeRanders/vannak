@@ -609,13 +609,15 @@ checkpoint-data boundary. The `daemon` feature attaches segment discovery and a
 lease-gated background writer loop at the supervisor boundary; the `vannak`
 binary reopens existing outbox and process-journal segments when configured
 paths already exist, shares a stop token across daemon/Raft/Kafka/writer loops,
-and handles Ctrl-C/SIGTERM for orderly shutdown. The background writer publishes
-live owned snapshots into the daemon health state every cycle and records
-acknowledged outbox checkpoints into the local control state after successful
-target drains. Richer retry policy and replicated checkpoint publication remain
-separate control-plane concerns so they can be attached to Raft-controlled
-ownership without changing code that produces process events or metadata write
-payloads.
+and handles Ctrl-C/SIGTERM for orderly shutdown. Startup validates positive
+operator limits, complete Ipto placement pairs, health-listener binding, and
+default outbox directory creation before serving traffic. The background writer
+publishes live owned snapshots into the daemon health state every cycle and
+records acknowledged outbox checkpoints into the local control state after
+successful target drains. Richer retry policy and replicated checkpoint
+publication remain separate control-plane concerns so they can be attached to
+Raft-controlled ownership without changing code that produces process events or
+metadata write payloads.
 
 ## 9. Raft-Controlled State
 

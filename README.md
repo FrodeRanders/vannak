@@ -261,12 +261,17 @@ If the configured outbox or journal file already exists, the supervisor
 validates and reopens it for append. The HTTP daemon parses `/ingest` and
 `/query` bodies as JSON and rejects unknown event kinds or process statuses
 instead of silently defaulting them. When the background writer is enabled,
-`/health` reports live writer cycles and totals while the loop is running. If
-`--outbox` is omitted, the default path is under the Raft data directory when
-Raft is configured, otherwise under `$HOME/.local/state/vannak`. The HTTP server
-rejects POST bodies larger than `--max-request-body-bytes` (default 1 MiB).
-`--with-ipto` starts in degraded mode if the writer cannot initialize; add
-`--require-ipto` to fail startup instead.
+`/health` reports live writer cycles and totals while the loop is running.
+`GET /` and `GET /health` are the health routes; other paths return `404`.
+Health bind failures are returned as startup errors. If `--outbox` is omitted,
+the default path is under the Raft data directory when Raft is configured,
+otherwise under `$HOME/.local/state/vannak`, and directory creation failures
+abort startup. The HTTP server rejects POST bodies larger than
+`--max-request-body-bytes` (default 1 MiB). Numeric limits such as
+`--writer-interval` and `--max-request-body-bytes` must be greater than zero,
+and `--placement` must contain an epoch followed by complete target/vnode
+pairs. `--with-ipto` starts in degraded mode if the writer cannot initialize;
+add `--require-ipto` to fail startup instead.
 
 ## Crate Layout
 

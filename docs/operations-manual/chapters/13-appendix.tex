@@ -273,12 +273,12 @@ Option & Effect \\
 \shellcmd{--health <bind-addr>} & health/query HTTP server bind address (default \texttt{127.0.0.1:9090}) \\
 \shellcmd{--outbox <path> <seg-id> <node-id>} & metadata outbox segment path and identity \\
 \shellcmd{--journal <path>} & process-event journal segment path \\
-\shellcmd{--max-request-body-bytes <bytes>} & maximum \texttt{POST} body size (default 1048576) \\
-\shellcmd{--writer-interval <secs>} & background writer drain interval (default 5) \\
+\shellcmd{--max-request-body-bytes <bytes>} & maximum \texttt{POST} body size; must be greater than zero (default 1048576) \\
+\shellcmd{--writer-interval <secs>} & background writer drain interval; must be greater than zero (default 5) \\
 \shellcmd{--with-ipto} & try to start \texttt{IptoRepoWriter} background drains (requires \texttt{ipto-writer}) \\
-\shellcmd{--require-ipto} & fail startup if \shellcmd{--with-ipto} cannot initialize the writer \\
+\shellcmd{--require-ipto} & fail startup if \shellcmd{--with-ipto} cannot initialize the writer; valid only with \shellcmd{--with-ipto} \\
 \shellcmd{--ipto-tenant <id>} & \ipto{} tenant id for \shellcmd{--with-ipto} (default 1) \\
-\shellcmd{--placement <epoch> <target> <vnodes> ...} & Ipto placement map \\
+\shellcmd{--placement <epoch> <target> <vnodes> ...} & Ipto placement map with complete target/vnode pairs \\
 \hline
 \end{tabular}
 \caption{\texttt{vannak} supervisor daemon options.}

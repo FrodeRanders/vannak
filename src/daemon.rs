@@ -407,21 +407,17 @@ pub struct DaemonSnapshot {
 /// calling thread until `stop_token` becomes `true`, then shuts down
 /// gracefully.
 ///
-/// # Panics
-///
-/// Panics if the listener cannot bind.
+/// Returns an I/O error if the listener cannot bind or cannot be configured as
+/// nonblocking.
 pub fn start_health_server(
     service: Arc<Mutex<VannakService>>,
     background_writer_snapshot: Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
     config: DaemonConfig,
     start_time: Instant,
     stop_token: Arc<AtomicBool>,
-) {
-    let listener =
-        TcpListener::bind(&config.bind_address).expect("daemon: failed to bind health listener");
-    listener
-        .set_nonblocking(true)
-        .expect("daemon: failed to set listener nonblocking");
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(&config.bind_address)?;
+    listener.set_nonblocking(true)?;
 
     let poll_interval = Duration::from_millis(100);
 
@@ -444,6 +440,7 @@ pub fn start_health_server(
             }
         }
     }
+    Ok(())
 }
 
 fn handle_health_request(
@@ -478,7 +475,10 @@ fn handle_health_request(
 
     let _ = stream.set_nonblocking(false);
 
-    if request_line.starts_with("POST /ingest") {
+    let method = request_line.split_whitespace().next().unwrap_or_default();
+    let path = request_line.split_whitespace().nth(1).unwrap_or_default();
+
+    if method == "POST" && path == "/ingest" {
         let body = match read_request_body(&mut reader, content_length, config) {
             Ok(body) => body,
             Err((status, body)) => {
@@ -492,7 +492,7 @@ fn handle_health_request(
         return;
     }
 
-    if request_line.starts_with("POST /query") {
+    if method == "POST" && path == "/query" {
         let body = match read_request_body(&mut reader, content_length, config) {
             Ok(body) => body,
             Err((status, body)) => {
@@ -506,7 +506,7 @@ fn handle_health_request(
         return;
     }
 
-    let status = if request_line.starts_with("GET /") {
+    let status = if method == "GET" && (path == "/" || path == "/health") {
         "200 OK"
     } else {
         "404 Not Found"
@@ -1464,14 +1464,14 @@ impl Daemon {
     pub fn serve_health(
         &self,
         background_writer_snapshot: Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
-    ) {
+    ) -> std::io::Result<()> {
         start_health_server(
             self.service.clone(),
             background_writer_snapshot,
             self.config.clone(),
             self.start_time,
             self.stop_token.clone(),
-        );
+        )
     }
 
     /// Signals the daemon to stop all background loops.
@@ -1655,6 +1655,49 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
         assert!(response.contains("request body too large"));
+    }
+
+    #[test]
+    fn health_server_does_not_treat_every_get_as_health() {
+        let dir = tempdir();
+        let path = dir.join("health-route-test.seg");
+        let svc = VannakService::create(
+            IptoPlacementMap::new(
+                PlacementEpoch(1),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+                vec![],
+            )
+            .unwrap(),
+            IptoMapping::new("v1"),
+            &path,
+            SegmentId::from("health-route-test-seg"),
+            NodeId::from("node-a"),
+        )
+        .unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = Arc::new(Mutex::new(svc));
+        let bw: Arc<Mutex<Option<BackgroundWriterSnapshot>>> = Arc::new(Mutex::new(None));
+        let config = DaemonConfig::default();
+
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_health_request(stream, &service, &bw, &config, Instant::now());
+        });
+
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(b"GET /not-health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(response.contains("not found"));
     }
 
     // -- daemon lifecycle --
