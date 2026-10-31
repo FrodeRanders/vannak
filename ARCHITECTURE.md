@@ -709,8 +709,11 @@ The election timeout is 3000 ms, above Graft's 750 ms heartbeat interval.
 concrete writer is bound to that target and rejects payloads addressed elsewhere.
 A registry of independently configured repository connections is required before
 multi-target writer delivery is enabled. Idempotency checks use tenant-scoped
-correlation-ID searches. Ipto 0.1.0's correlation-ID fetch recursively locks its
-PostgreSQL client when a unit exists, so that fetch cannot be used for replay.
+correlation-ID searches because only existence is needed and a unit in another
+tenant must not suppress delivery. Vannak pins Ipto to commit
+`b855a92f257e8b1fa6847799be57945c97aa5729`, which includes the PostgreSQL
+correlation-ID lookup deadlock fix and its regression test. The search remains
+intentional even with that fix; it avoids fetching the complete unit.
 
 ### Raft Boundary
 

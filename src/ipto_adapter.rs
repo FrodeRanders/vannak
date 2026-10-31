@@ -234,9 +234,8 @@ impl IptoRepoWriter {
     }
 
     fn correlation_exists(&self, corrid: &str) -> Result<bool, IptoWriteError> {
-        // Ipto 0.1.0's get_unit_by_corrid_json holds its PostgreSQL client
-        // mutex while recursively loading a found unit. Search checks existence
-        // without that recursive lock and scopes idempotency to this tenant.
+        // Idempotency is scoped to this tenant. Search checks existence without
+        // fetching a complete unit or matching a unit from another tenant.
         self.repo
             .search_units(
                 serde_json::json!({"tenantid": self.tenant_id, "corrid": corrid}),

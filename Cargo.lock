@@ -801,8 +801,7 @@ dependencies = [
 [[package]]
 name = "ipto"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "034fea7eba1acd24ba95754907bbf9bc03d29440180483e5c2dc96cc063d9c59"
+source = "git+https://github.com/FrodeRanders/ipto.git?rev=b855a92f257e8b1fa6847799be57945c97aa5729#b855a92f257e8b1fa6847799be57945c97aa5729"
 dependencies = [
  "base64",
  "chrono",

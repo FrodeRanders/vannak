@@ -25,7 +25,7 @@ name = "vannak"
 path = "src/lib.rs"
 
 [dependencies]
-ipto = { version = "0.1.0", optional = true, default-features = false }
+ipto = { git = "https://github.com/FrodeRanders/ipto.git", rev = "b855a92f257e8b1fa6847799be57945c97aa5729", optional = true, default-features = false }
 serde_json = { version = "1", optional = true }
 uuid = { version = "1", features = ["v7"], optional = true }
 gautelis-graft-core = { version = "0.1.0", optional = true }
