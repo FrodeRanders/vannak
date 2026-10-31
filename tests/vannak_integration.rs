@@ -446,6 +446,27 @@ fn full_ingest_index_outbox_ipto_flow() {
         "re-enqueuing the same payload should return Duplicate"
     );
 
+    // A fresh delivery after recovery must recognize existing entities and
+    // relation units without deadlocking or creating another unit.
+    for event in &metadata_events {
+        let payload = IptoWritePayload::from_event(event, &target, &mapping);
+        vannak::IptoWriter::write(&mut writer, &payload).expect("idempotent replay must finish");
+    }
+    let after_replay = repo
+        .search_units(
+            serde_json::json!({"tenantid": 1, "status": 30}),
+            ipto_rust::model::SearchOrder {
+                field: "created".into(),
+                descending: true,
+            },
+            ipto_rust::model::SearchPaging {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(after_replay.total_hits, search_result.total_hits);
+
     eprintln!("SUCCESS: full ingest→index→outbox→Ipto flow verified");
 }
 

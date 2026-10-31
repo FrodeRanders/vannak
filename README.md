@@ -31,9 +31,8 @@ It is meant to connect four related capabilities:
 - **Raft** cluster control: agreed ownership, placement maps, checkpoints, and
   sealed-segment manifests.
 
-The goal is not another generic log collector. Vannak is intended to answer
-operational questions that need process state, data provenance, metadata
-meaning, and cluster ownership at the same time.
+Vannak is intended to answer operational questions that need process state,
+data provenance, metadata meaning, and cluster ownership at the same time.
 
 Examples:
 
@@ -51,8 +50,9 @@ Examples:
 
 This repository currently contains the dependency-free Rust core types,
 reducers, a single-node service orchestration boundary, and optional adapters
-behind feature flags. The standalone Kafka runner can feed Sitas workers; the
-node binary does not yet supervise that runner.
+behind feature flags. The supervisor runs HTTP and optional Kafka ingest against
+the same Sitas shard-owned process indexes, with a durable process journal.
+Raft mode uses committed placement, writer leases, and checkpoint proposals.
 
 Implemented so far:
 
@@ -232,12 +232,17 @@ replays them into owned events, and can reopen validated segments for append.
 single-node metadata capture path, and can drain a specific Ipto target only
 when the caller holds the target's writer lease. The `vannak` supervisor
 discovers existing segment files at startup, recovers existing metadata outbox
-and process-event journal segments for append, initializes its local control
-state from the same placement map used by the service, and can start a
+and process-event journal segments for append, reads committed control state
+through Raft when configured (local control in standalone mode), and can start a
 PostgreSQL-backed background Ipto writer with `--with-ipto` when built with
 `ipto-writer`. The supervisor handles Ctrl-C/SIGTERM by setting the shared
 daemon, Raft, Kafka, and writer stop token. Background writer drains publish
-acknowledged metadata outbox checkpoints into the local control state.
+acknowledged metadata outbox checkpoints through the selected control plane.
+Transient Ipto failures retry on later writer cycles; permanent failures stay
+parked. New outbox records preserve the original provenance event as well as its
+mapped Ipto payload, so restart rebuilds local provenance queries. New readers
+accept legacy payload-only records; old binaries cannot read new provenance
+extensions.
 
 ## Supervisor Daemon
 
@@ -256,6 +261,43 @@ target/debug/vannak --outbox ~/.local/state/vannak/metadata-outbox.seg default-o
   --journal ~/.local/state/vannak/process-events.seg \
   --with-ipto --ipto-tenant 1
 ```
+
+The process journal defaults to `<outbox-path>.process.seg`; `--journal` overrides
+it. `POST /ingest` syncs process events before admission. Kafka ingest uses the
+same journal and shard indexes. Add `kafka-client` to the build features and use
+`--kafka <brokers> <group-id> <shards> <mailbox-capacity> [topics...]` to enable it.
+
+`POST /ingest/metadata` durably captures data-individual metadata, for example:
+
+```json
+{
+  "metadata_event_id": "received-1",
+  "data_individual_id": "customer-42",
+  "tenant_id": "tenant-a",
+  "environment_id": "prod",
+  "pipeline_id": "customers",
+  "process_instance_id": "run-1",
+  "timestamp": "2026-10-31T10:00:00Z",
+  "operation": "Received",
+  "passive_metadata": {"source": "customer-topic"},
+  "active_metadata": {"validated": true}
+}
+```
+
+Optional `data_individual_shard_id` overrides deterministic derivation from the
+individual identity. Metadata values support strings, signed integers, booleans,
+string lists, and `{"timestamp": "..."}` values. Additional operations are
+`Created`, `Transformed` (optional `plugin_name`/`plugin_version`), `Masked`
+(required `fields`), `Validated` (required `passed`), `Enriched` (optional
+`source`), `Routed`, and `Persisted`. Metadata queries use `DataIndividualMetadata`,
+`ProcessMetadata`, or `ActivityMetadata` in `POST /query`, with the corresponding
+identity fields and optional `limit`.
+
+In Raft mode, metadata capture must reach the committed writer holder for its
+target. Quorum loss stops metadata admission/delivery; process intake continues.
+Writer ownership is not reassigned automatically. `--with-ipto` currently allows
+one placement target per supervisor and binds its repository connection to that
+target.
 
 If the configured outbox or journal file already exists, the supervisor
 validates and reopens it for append. The HTTP daemon parses `/ingest` and
@@ -291,6 +333,9 @@ src/
   metadata.rs       typed metadata references
   observability.rs  owned snapshot types
   process.rs        process reducer and current-state view
+  process_index.rs  typed local/Sitas process-index access
+  control.rs        committed control read/proposal contract
+  node_control.rs   leader-backed Raft control access (feature: node)
   query.rs          query request/result types
   runtime.rs        dependency-free shard-local runtime, bounded ingest,
                     and Sitas boundary
@@ -311,6 +356,8 @@ Requires stable Rust with edition 2024 support.
 ```bash
 cargo fmt --check
 cargo test
+cargo test --all-features
+cargo test --release --all-features
 cargo clippy --all-targets -- -D warnings
 ```
 
@@ -344,3 +391,13 @@ Near-term growth order:
 6. Add Raft-backed placement maps, checkpoints, and segment manifests.
 7. Add recovery and ownership-transfer semantics.
 
+
+The opt-in supervisor integration test exercises the executable with Kafka,
+PostgreSQL, Raft, HTTP ingest/query, and restart recovery:
+
+```bash
+VANNAK_SUPERVISOR_INTEGRATION=1 cargo test --all-features --test supervisor_integration -- --nocapture
+```
+
+It uses `VANNAK_KAFKA_BROKERS` (default `localhost:19092`) and Ipto's `IPTO_PG_*`
+environment variables. Start the test Compose services first.

@@ -27,6 +27,7 @@ CLUSTER_COMPOSE="$PROJECT_DIR/docker-compose.cluster.yml"
 KAFKA_COMPOSE="$PROJECT_DIR/docker-compose.kafka.yml"
 FULL_COMPOSE="$PROJECT_DIR/docker-compose.full.yml"
 export VANNAK_PG_PORT="${VANNAK_PG_PORT:-5432}"
+export IPTO_PG_PORT="${IPTO_PG_PORT:-$VANNAK_PG_PORT}"
 export VANNAK_KAFKA_PORT="${VANNAK_KAFKA_PORT:-19092}"
 
 NO_BUILD=false
@@ -194,6 +195,7 @@ if [ "$KAFKA_ONLY" = false ] && [ "$RUN_CLUSTER" = true ]; then
             echo "  --- $node ---"
             docker compose -f "$CLUSTER_COMPOSE" logs "$node" 2>/dev/null | tail -5
         done
+        exit 1
     fi
 
     echo "==> Cluster test complete."
@@ -234,7 +236,7 @@ if [ "$RUN_FULL" = true ]; then
     curl -sf -X POST http://127.0.0.1:19090/query \
         -H 'Content-Type: application/json' \
         -d '{"type":"ProcessInstance","process_instance_id":"test-1"}' \
-        2>/dev/null | python3 -m json.tool 2>/dev/null || echo "(unreachable)"
+        | python3 -c 'import json, sys; result = json.load(sys.stdin); assert any(item["process_instance_id"] == "test-1" for item in result["instance"]), result; print(json.dumps(result, indent=2))'
 
     echo "==> Full-stack demo complete."
 fi

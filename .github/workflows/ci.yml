@@ -38,6 +38,12 @@ jobs:
       - name: test (no features)
         run: cargo test
 
+      - name: clippy (daemon)
+        run: cargo clippy --features daemon --all-targets -- -D warnings
+
+      - name: test (daemon)
+        run: cargo test --features daemon
+
       - name: clippy (ipto-writer)
         run: cargo clippy --features ipto-writer --all-targets -- -D warnings
 
@@ -52,6 +58,15 @@ jobs:
 
       - name: build (node)
         run: cargo build --features node
+
+      - name: clippy (all features)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      - name: test (all features)
+        run: cargo test --all-features
+
+      - name: test (optimized, all features)
+        run: cargo test --release --all-features
 
   # -----------------------------------------------------------------------
   # Ipto writer integration test (PostgreSQL)
@@ -99,6 +114,34 @@ jobs:
 
       - name: Run cluster test
         run: ./scripts/run-integration-test.sh --cluster --no-build
+
+  # Live Kafka verifies durable admission into the service's queryable index.
+  integration-kafka:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-workspaces: |
+            . -> target
+      - name: Checkout Ipto SQL schema
+        run: git clone --depth 1 https://github.com/FrodeRanders/ipto.git ../ipto
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler zlib1g-dev
+      - name: Start PostgreSQL
+        run: docker compose -f docker-compose.test.yml up -d --wait postgres
+      - name: Start Kafka broker
+        run: docker compose -f docker-compose.kafka.yml up -d --wait redpanda
+      - name: Test Kafka service admission
+        run: VANNAK_KAFKA_INTEGRATION=1 cargo test --features kafka-client --test kafka_integration -- --nocapture
+      - name: Test actual supervisor and restart
+        run: VANNAK_SUPERVISOR_INTEGRATION=1 cargo test --all-features --test supervisor_integration -- --nocapture
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v
+      - name: Stop Kafka broker
+        if: always()
+        run: docker compose -f docker-compose.kafka.yml down -v
 
   # -----------------------------------------------------------------------
   # Format check

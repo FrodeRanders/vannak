@@ -234,3 +234,13 @@ up to which delivery is durable, the mapping version in force, and a monotonic
 \texttt{CheckpointEpoch} used to reject stale records.
 
 \endinput
+
+\subsection{Writer Retry and Checkpoint Policy}
+
+Transient delivery failures are requeued once per writer cycle. Permanent
+failures remain parked for explicit retry. Checkpoints cover only a contiguous
+acknowledged prefix within each shard/target stream, so later successful writes
+cannot hide an earlier failed record. Failed Raft checkpoint proposals retry on
+later cycles, even without new deliveries. The health snapshot exposes the
+latest control-plane failure as
+\texttt{background\_writer.last\_control\_error}.

@@ -266,6 +266,7 @@ pub struct BackgroundWriterSnapshot {
     pub total_acknowledged: usize,
     /// Total failed deliveries.
     pub total_failed: usize,
+    pub last_control_error: Option<String>,
     pub current_cycle: Option<u64>,
     pub last_summary: Option<Vec<(crate::ipto::IptoInstanceId, MetadataOutboxDrainSummary)>>,
 }
@@ -277,7 +278,7 @@ pub struct BackgroundWriterSnapshot {
 /// access from the health endpoint.
 pub fn run_background_writer(
     service: Arc<Mutex<VannakService>>,
-    control_state: Arc<Mutex<ClusterControlState>>,
+    control_state: Arc<dyn crate::control::ControlPlane>,
     node_id: NodeId,
     writer: Arc<Mutex<dyn IptoWriter + Send>>,
     config: BackgroundWriterConfig,
@@ -296,7 +297,7 @@ pub fn run_background_writer(
 
 fn run_background_writer_with_updates(
     service: Arc<Mutex<VannakService>>,
-    control_state: Arc<Mutex<ClusterControlState>>,
+    control_state: Arc<dyn crate::control::ControlPlane>,
     node_id: NodeId,
     writer: Arc<Mutex<dyn IptoWriter + Send>>,
     config: BackgroundWriterConfig,
@@ -309,45 +310,82 @@ fn run_background_writer_with_updates(
         snapshot.cycles += 1;
         snapshot.current_cycle = Some(snapshot.cycles);
 
-        let targets: Vec<_> = {
-            let control = control_state.lock().unwrap();
-            control
-                .placement_map()
-                .map(|map| map.instances())
-                .unwrap_or_default()
-        };
-
-        let mut cycle_summaries = Vec::new();
-        for target in &targets {
-            let mut svc = service.lock().unwrap();
-            let mut control = control_state.lock().unwrap();
-            let mut w = writer.lock().unwrap();
-
-            match svc.drain_metadata_for_target_if_lease_held(
-                &control,
-                &node_id,
-                target,
-                &mut *w,
-                config.max_drain_attempts_per_target,
-            ) {
-                Ok(summary) if !summary.is_empty() => {
-                    snapshot.total_acknowledged += summary.acknowledged;
-                    snapshot.total_failed += summary.failed;
-                    if summary.acknowledged > 0 {
-                        let checkpoints = svc.acknowledged_checkpoints_for_target(
-                            target,
-                            CheckpointEpoch(snapshot.cycles),
-                        );
-                        for checkpoint in checkpoints {
-                            let _ = control
-                                .apply(ClusterControlCommand::RecordOutboxCheckpoint(checkpoint));
-                        }
-                    }
-                    cycle_summaries.push((target.clone(), summary));
+        let control = match control_state.read() {
+            Ok(control) => {
+                snapshot.last_control_error = None;
+                control
+            }
+            Err(error) => {
+                snapshot.last_control_error = Some(error);
+                if let Some(live) = &live_snapshot {
+                    *live.lock().unwrap() = Some(snapshot.clone());
                 }
-                Ok(_) => {}
-                Err(VannakServiceError::WriterLeaseNotHeld { .. }) => {}
-                Err(_) => {}
+                wait_for_writer_cycle(&stop_token, config.interval.min(Duration::from_secs(1)));
+                continue;
+            }
+        };
+        let targets = control
+            .placement_map()
+            .map(|map| map.instances())
+            .unwrap_or_default();
+        let mut cycle_summaries = Vec::new();
+        let checkpoint_epoch = CheckpointEpoch(
+            control
+                .outbox_checkpoints()
+                .values()
+                .map(|checkpoint| checkpoint.epoch.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(snapshot.cycles),
+        );
+        for target in &targets {
+            if control
+                .writer_lease(target)
+                .is_none_or(|lease| lease.holder != node_id)
+            {
+                continue;
+            }
+            let (result, checkpoints) = {
+                let mut svc = service.lock().unwrap();
+                let mut writer = writer.lock().unwrap();
+                svc.metadata_outbox_mut()
+                    .outbox_mut()
+                    .retry_failed_for_target(target);
+                let result = svc.drain_metadata_for_target_if_lease_held(
+                    &control,
+                    &node_id,
+                    target,
+                    &mut *writer,
+                    config.max_drain_attempts_per_target,
+                );
+                let checkpoints = svc.acknowledged_checkpoints_for_target(target, checkpoint_epoch);
+                (result, checkpoints)
+            };
+            if let Ok(summary) = result
+                && !summary.is_empty()
+            {
+                snapshot.total_acknowledged += summary.acknowledged;
+                snapshot.total_failed += summary.failed;
+                cycle_summaries.push((target.clone(), summary));
+            }
+            // Retry uncommitted checkpoints even when this cycle had no writes.
+            // Do not hold the service lock while waiting for consensus.
+            for checkpoint in checkpoints {
+                if control
+                    .outbox_checkpoint(checkpoint.data_individual_shard_id, target)
+                    .is_some_and(|committed| {
+                        committed.segment_id == checkpoint.segment_id
+                            && committed.last_acknowledged_offset
+                                >= checkpoint.last_acknowledged_offset
+                    })
+                {
+                    continue;
+                }
+                if let Err(error) =
+                    control_state.propose(ClusterControlCommand::RecordOutboxCheckpoint(checkpoint))
+                {
+                    snapshot.last_control_error = Some(error);
+                }
             }
         }
 
@@ -357,7 +395,7 @@ fn run_background_writer_with_updates(
         if let Some(ref live_snapshot) = live_snapshot {
             *live_snapshot.lock().unwrap() = Some(snapshot.clone());
         }
-        std::thread::sleep(config.interval);
+        wait_for_writer_cycle(&stop_token, config.interval);
     }
 
     snapshot.current_cycle = Some(snapshot.cycles);
@@ -365,6 +403,17 @@ fn run_background_writer_with_updates(
         *live_snapshot.lock().unwrap() = Some(snapshot.clone());
     }
     snapshot
+}
+
+fn wait_for_writer_cycle(stop: &AtomicBool, interval: Duration) {
+    let deadline = Instant::now() + interval;
+    while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(50)),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +527,19 @@ fn handle_health_request(
     let method = request_line.split_whitespace().next().unwrap_or_default();
     let path = request_line.split_whitespace().nth(1).unwrap_or_default();
 
+    if method == "POST" && path == "/ingest/metadata" {
+        let body = match read_request_body(&mut reader, content_length, config) {
+            Ok(body) => body,
+            Err((status, body)) => {
+                write_json_response(&mut stream, status, &body);
+                return;
+            }
+        };
+        let (status, result) = handle_metadata_ingest_request(service, &body);
+        write_json_response(&mut stream, status, &result);
+        return;
+    }
+
     if method == "POST" && path == "/ingest" {
         let body = match read_request_body(&mut reader, content_length, config) {
             Ok(body) => body,
@@ -575,15 +637,167 @@ fn handle_ingest_request(
         );
     };
 
-    match svc.ingest_process_event(event) {
+    match svc.ingest_process_event_configured(event) {
         Ok(crate::index::IngestOutcome::Accepted) => {
             ("200 OK", r#"{"status":"accepted"}"#.to_string())
         }
         Ok(crate::index::IngestOutcome::Duplicate) => {
             ("200 OK", r#"{"status":"duplicate"}"#.to_string())
         }
-        Err(e) => ("400 Bad Request", format!(r#"{{"error":"{}"}}"#, e)),
+        Err(VannakServiceError::ProcessIngest(error)) => (
+            "400 Bad Request",
+            serde_json::json!({"error": error.to_string()}).to_string(),
+        ),
+        Err(error) => service_error_response(error),
     }
+}
+
+fn handle_metadata_ingest_request(
+    service: &Arc<Mutex<VannakService>>,
+    body: &str,
+) -> (&'static str, String) {
+    let event = match parse_metadata_event_json(body) {
+        Ok(event) => event,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({"error": error}).to_string(),
+            );
+        }
+    };
+    let Ok(mut service) = service.lock() else {
+        return (
+            "503 Service Unavailable",
+            r#"{"error":"service unavailable"}"#.into(),
+        );
+    };
+    match service.capture_metadata_event(&event) {
+        Ok(result) => ("200 OK", serde_json::json!({
+            "status": if matches!(result.result, crate::ipto::DurableOutboxEnqueueResult::Duplicate) { "duplicate" } else { "accepted" },
+            "target": result.target.as_str(),
+        }).to_string()),
+        Err(error) => service_error_response(error),
+    }
+}
+
+fn parse_metadata_event_json(
+    body: &str,
+) -> Result<crate::data::DataIndividualMetadataEvent, String> {
+    use crate::data::*;
+    let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let required = |field| {
+        json_string_field(&value, field)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("missing or empty {field}"))
+    };
+    let data_id = DataIndividualId::from(required("data_individual_id")?);
+    let shard = match value.get("data_individual_shard_id") {
+        Some(value) => {
+            DataIndividualShardId(value.as_u64().ok_or("invalid data_individual_shard_id")?)
+        }
+        None => DataIndividualShardId::from_data_individual(&data_id),
+    };
+    let operation = match required("operation")?.as_str() {
+        "Created" => MetadataOperation::Created,
+        "Received" => MetadataOperation::Received,
+        "Transformed" => MetadataOperation::Transformed {
+            plugin_name: json_string_field(&value, "plugin_name").map(PluginName::from),
+            plugin_version: json_string_field(&value, "plugin_version").map(PluginVersion::from),
+        },
+        "Masked" => MetadataOperation::Masked {
+            fields: value
+                .get("fields")
+                .and_then(Value::as_array)
+                .ok_or("Masked requires fields")?
+                .iter()
+                .map(|field| {
+                    field
+                        .as_str()
+                        .map(String::from)
+                        .ok_or("invalid masked field")
+                })
+                .collect::<Result<_, _>>()?,
+        },
+        "Validated" => MetadataOperation::Validated {
+            passed: value
+                .get("passed")
+                .and_then(Value::as_bool)
+                .ok_or("Validated requires passed")?,
+        },
+        "Enriched" => MetadataOperation::Enriched {
+            source: json_string_field(&value, "source"),
+        },
+        "Routed" => MetadataOperation::Routed,
+        "Persisted" => MetadataOperation::Persisted,
+        _ => return Err("invalid metadata operation".into()),
+    };
+    let mut event = DataIndividualMetadataEvent::new(
+        MetadataEventId::from(required("metadata_event_id")?),
+        data_id,
+        shard,
+        crate::process::TenantId::from(required("tenant_id")?),
+        crate::process::EnvironmentId::from(required("environment_id")?),
+        crate::process::PipelineId::from(required("pipeline_id")?),
+        crate::process::ProcessInstanceId::from(required("process_instance_id")?),
+        crate::ingest::EventTimestamp::from(required("timestamp")?),
+        operation,
+    );
+    if let Some(activity) = json_string_field(&value, "activity_id") {
+        event = event.with_activity_id(crate::process::ActivityId::from(activity));
+    }
+    if let Some(payload) = json_string_field(&value, "source_payload_ref") {
+        event = event.with_source_payload_ref(PayloadRef::from(payload));
+    }
+    let mut passive = PassiveMetadata::new();
+    let mut active = ActiveMetadata::new();
+    for (field, is_passive) in [("passive_metadata", true), ("active_metadata", false)] {
+        if let Some(fields) = value.get(field) {
+            for (name, value) in fields
+                .as_object()
+                .ok_or_else(|| format!("{field} must be an object"))?
+            {
+                let metadata_value = match value {
+                    Value::String(value) => MetadataValue::string(value),
+                    Value::Bool(value) => MetadataValue::Boolean(*value),
+                    Value::Number(value) => MetadataValue::Integer(
+                        value
+                            .as_i64()
+                            .ok_or("metadata numbers must be signed integers")?,
+                    ),
+                    Value::Array(values) => MetadataValue::StringList(
+                        values
+                            .iter()
+                            .map(|value| {
+                                value
+                                    .as_str()
+                                    .map(String::from)
+                                    .ok_or("metadata lists must contain strings")
+                            })
+                            .collect::<Result<_, _>>()?,
+                    ),
+                    Value::Object(value) if value.len() == 1 => {
+                        MetadataValue::Timestamp(crate::ingest::EventTimestamp::from(
+                            value
+                                .get("timestamp")
+                                .and_then(Value::as_str)
+                                .ok_or("expected timestamp object")?,
+                        ))
+                    }
+                    _ => return Err("unsupported metadata value".into()),
+                };
+                if is_passive {
+                    passive = passive.insert(name.as_str(), metadata_value);
+                } else {
+                    active = active.insert(name.as_str(), metadata_value);
+                }
+            }
+        }
+    }
+    event = event
+        .with_passive_metadata(passive)
+        .with_active_metadata(active);
+    event.validate().map_err(|error| error.to_string())?;
+    Ok(event)
 }
 
 /// Parses a minimal JSON process event into a `PipelineEvent`.
@@ -618,7 +832,12 @@ fn parse_ingest_event_json(json: &str) -> Option<crate::ingest::PipelineEvent> {
             use std::sync::atomic::AtomicU64;
             static COUNTER: AtomicU64 = AtomicU64::new(1);
             crate::ingest::EventId::from(format!(
-                "ingest-{}",
+                "ingest-{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
                 COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ))
         });
@@ -689,21 +908,21 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
             process_instance_id: crate::process::ProcessInstanceId::from(id),
         });
         match result {
-            Some(snap) => {
-                let json = format!(
-                    r#"{{"type":"ProcessInstances","instance":[{{"process_instance_id":"{}","pipeline_id":"{}","status":"{:?}"}}]}}"#,
-                    snap.process_instance_id.as_str(),
-                    snap.pipeline_id.as_str(),
-                    snap.status,
+            Ok(Some(snap)) => {
+                return (
+                    "200 OK",
+                    serialize_query_result(&crate::query::QueryResult::ProcessInstances(vec![
+                        snap,
+                    ])),
                 );
-                return ("200 OK", json);
             }
-            None => {
+            Ok(None) => {
                 return (
                     "200 OK",
                     r#"{"type":"ProcessInstances","instance":[]}"#.to_string(),
                 );
             }
+            Err(error) => return service_error_response(error),
         }
     }
 
@@ -715,7 +934,10 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
             pipeline_id: crate::process::PipelineId::from(id),
             limit: crate::query::QueryLimit::new(limit_val as usize),
         });
-        return ("200 OK", serialize_query_result(&result));
+        return match result {
+            Ok(result) => ("200 OK", serialize_query_result(&result)),
+            Err(error) => service_error_response(error),
+        };
     }
 
     if query_type == "ProcessStatus"
@@ -738,6 +960,43 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
             status,
             limit: crate::query::QueryLimit::new(limit_val as usize),
         });
+        return match result {
+            Ok(result) => ("200 OK", serialize_query_result(&result)),
+            Err(error) => service_error_response(error),
+        };
+    }
+
+    let limit =
+        crate::query::QueryLimit::new(json_u64_field(&value, "limit").unwrap_or(100) as usize);
+    if query_type == "DataIndividualMetadata"
+        && let Some(id) = json_string_field(&value, "data_individual_id")
+    {
+        let result = svc.metadata_for_data_individual(&crate::query::DataIndividualMetadataQuery {
+            data_individual_id: crate::data::DataIndividualId::from(id),
+            limit,
+        });
+        return ("200 OK", serialize_query_result(&result));
+    }
+    if query_type == "ProcessMetadata"
+        && let Some(id) = json_string_field(&value, "process_instance_id")
+    {
+        let result = svc.metadata_for_process(&crate::query::ProcessMetadataQuery {
+            process_instance_id: crate::process::ProcessInstanceId::from(id),
+            limit,
+        });
+        return ("200 OK", serialize_query_result(&result));
+    }
+    if query_type == "ActivityMetadata"
+        && let (Some(process), Some(activity)) = (
+            json_string_field(&value, "process_instance_id"),
+            json_string_field(&value, "activity_id"),
+        )
+    {
+        let result = svc.metadata_for_activity(&crate::query::ActivityMetadataQuery {
+            process_instance_id: crate::process::ProcessInstanceId::from(process),
+            activity_id: crate::process::ActivityId::from(activity),
+            limit,
+        });
         return ("200 OK", serialize_query_result(&result));
     }
 
@@ -747,58 +1006,26 @@ fn handle_query_request(service: &Arc<Mutex<VannakService>>, body: &str) -> (&'s
     )
 }
 
+fn service_error_response(error: VannakServiceError) -> (&'static str, String) {
+    (
+        "503 Service Unavailable",
+        serde_json::json!({"error": error.to_string()}).to_string(),
+    )
+}
+
 fn serialize_query_result(result: &crate::query::QueryResult) -> String {
+    use crate::query::QueryResult;
     match result {
-        crate::query::QueryResult::ProcessInstances(instances) => {
-            let items: Vec<String> = instances
-                .iter()
-                .map(|snap| {
-                    format!(
-                        r#"{{"process_instance_id":"{}","pipeline_id":"{}","status":"{:?}"}}"#,
-                        snap.process_instance_id.as_str(),
-                        snap.pipeline_id.as_str(),
-                        snap.status,
-                    )
-                })
-                .collect();
-            format!(
-                r#"{{"type":"ProcessInstances","instance":[{}]}}"#,
-                items.join(",")
-            )
-        }
-        crate::query::QueryResult::Events(events) => {
-            let items: Vec<String> = events
-                .iter()
-                .map(|ev| {
-                    format!(
-                        r#"{{"event_id":"{}","pipeline_id":"{}","process_instance_id":"{}","kind":"{:?}"}}"#,
-                        ev.event_id().as_str(),
-                        ev.pipeline_id().as_str(),
-                        ev.process_instance_id().as_str(),
-                        ev.kind(),
-                    )
-                })
-                .collect();
-            format!(r#"{{"type":"Events","events":[{}]}}"#, items.join(","))
-        }
-        crate::query::QueryResult::MetadataEvents(events) => {
-            let items: Vec<String> = events
-                .iter()
-                .map(|ev| {
-                    format!(
-                        r#"{{"metadata_event_id":"{}","data_individual_id":"{}","operation":"{:?}"}}"#,
-                        ev.metadata_event_id().as_str(),
-                        ev.data_individual_id().as_str(),
-                        ev.operation(),
-                    )
-                })
-                .collect();
-            format!(
-                r#"{{"type":"MetadataEvents","events":[{}]}}"#,
-                items.join(",")
-            )
-        }
-    }
+        QueryResult::ProcessInstances(instances) => serde_json::json!({"type":"ProcessInstances", "instance": instances.iter().map(|snapshot|
+            serde_json::json!({"process_instance_id": snapshot.process_instance_id.as_str(), "pipeline_id": snapshot.pipeline_id.as_str(), "status": format!("{:?}", snapshot.status)})
+        ).collect::<Vec<_>>()}),
+        QueryResult::Events(events) => serde_json::json!({"type":"Events", "events": events.iter().map(|event|
+            serde_json::json!({"event_id": event.event_id().as_str(), "pipeline_id": event.pipeline_id().as_str(), "process_instance_id": event.process_instance_id().as_str(), "kind": format!("{:?}", event.kind())})
+        ).collect::<Vec<_>>()}),
+        QueryResult::MetadataEvents(events) => serde_json::json!({"type":"MetadataEvents", "events": events.iter().map(|event|
+            serde_json::json!({"metadata_event_id": event.metadata_event_id().as_str(), "data_individual_id": event.data_individual_id().as_str(), "operation": format!("{:?}", event.operation())})
+        ).collect::<Vec<_>>()}),
+    }.to_string()
 }
 
 fn json_string_field(value: &Value, field: &str) -> Option<String> {
@@ -814,7 +1041,7 @@ fn build_health_json(
     background_writer: &Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
     start_time: Instant,
 ) -> String {
-    let svc_snapshot = service.lock().map(|svc| svc.snapshot()).ok();
+    let svc_snapshot = service.lock().ok().and_then(|svc| svc.snapshot().ok());
     let bw_snapshot = background_writer
         .lock()
         .ok()
@@ -860,6 +1087,12 @@ fn build_health_json(
             format!("\"total_acknowledged\":{}", bw.total_acknowledged),
             format!("\"total_failed\":{}", bw.total_failed),
         ];
+        if let Some(error) = &bw.last_control_error {
+            bw_parts.push(format!(
+                "\"last_control_error\":{}",
+                serde_json::json!(error)
+            ));
+        }
         if let Some(cycle) = bw.current_cycle {
             bw_parts.push(format!("\"current_cycle\":{cycle}"));
         }
@@ -920,8 +1153,17 @@ pub fn fanout_process_instance_query(
         let svc = service.lock().unwrap();
         svc.process_instance(query)
     };
-    let mut instances: Vec<crate::process::ProcessInstanceSnapshot> = local.into_iter().collect();
-    let mut failed = Vec::new();
+    let mut instances: Vec<crate::process::ProcessInstanceSnapshot> = local
+        .as_ref()
+        .ok()
+        .and_then(|value| value.clone())
+        .into_iter()
+        .collect();
+    let mut failed = if local.is_err() {
+        vec!["local".to_string()]
+    } else {
+        Vec::new()
+    };
     let seen_ids: Vec<_> = instances
         .iter()
         .map(|i| i.process_instance_id.clone())
@@ -962,7 +1204,7 @@ pub fn fanout_pipeline_query(
 ) -> ClusterQueryResult {
     let local = service.lock().unwrap().pipeline_instances(query);
     let mut all_instances = match local {
-        crate::query::QueryResult::ProcessInstances(instances) => instances,
+        Ok(crate::query::QueryResult::ProcessInstances(instances)) => instances,
         _ => Vec::new(),
     };
     let mut failed = Vec::new();
@@ -1002,7 +1244,7 @@ pub fn fanout_process_status_query(
 ) -> ClusterQueryResult {
     let local = service.lock().unwrap().process_instances_by_status(query);
     let mut all_instances = match local {
-        crate::query::QueryResult::ProcessInstances(instances) => instances,
+        Ok(crate::query::QueryResult::ProcessInstances(instances)) => instances,
         _ => Vec::new(),
     };
     let mut failed = Vec::new();
@@ -1193,53 +1435,38 @@ pub fn detect_placement_change(
     from_map: &crate::cluster::IptoPlacementMap,
     to_map: &crate::cluster::IptoPlacementMap,
 ) -> PlacementChange {
-    let mut moved_ranges = Vec::new();
-
-    // Scan through the shard space and find contiguous ranges where the
-    // target instance changed. We sample at a reasonable granularity.
-    const SAMPLE_STEP: u64 = 1;
-    let mut range_start: Option<(
+    let mut boundaries = from_map.interval_starts();
+    boundaries.extend(to_map.interval_starts());
+    let boundaries: Vec<_> = boundaries.into_iter().collect();
+    let mut moved_ranges: Vec<(
         crate::data::DataIndividualShardId,
-        &crate::ipto::IptoInstanceId,
-        &crate::ipto::IptoInstanceId,
-    )> = None;
-
-    // Scan from 0 upward, looking for changes.
-    let mut shard = 0u64;
-    while shard < u64::MAX.saturating_sub(SAMPLE_STEP) {
-        let sid = crate::data::DataIndividualShardId(shard);
-        let from_target = from_map.resolve(sid);
-        let to_target = to_map.resolve(sid);
-
-        match (from_target, to_target) {
-            (Some(from), Some(to)) if from != to => {
-                if let Some((start, _, new_t)) = &range_start {
-                    if *new_t != to {
-                        // Different new target — close the previous range
-                        moved_ranges.push((
-                            *start,
-                            crate::data::DataIndividualShardId(shard.saturating_sub(1)),
-                            (*from).clone(),
-                            (*new_t).clone(),
-                        ));
-                        range_start = Some((sid, from, to));
-                    }
-                } else {
-                    range_start = Some((sid, from, to));
-                }
-            }
-            _ => {
-                if let Some((start, old_t, new_t)) = range_start.take() {
-                    moved_ranges.push((
-                        start,
-                        crate::data::DataIndividualShardId(shard.saturating_sub(1)),
-                        old_t.clone(),
-                        new_t.clone(),
-                    ));
-                }
-            }
+        crate::data::DataIndividualShardId,
+        crate::ipto::IptoInstanceId,
+        crate::ipto::IptoInstanceId,
+    )> = Vec::new();
+    for (index, &start) in boundaries.iter().enumerate() {
+        let end = boundaries.get(index + 1).map_or(u64::MAX, |next| next - 1);
+        let sid = crate::data::DataIndividualShardId(start);
+        let (Some(from), Some(to)) = (from_map.resolve(sid), to_map.resolve(sid)) else {
+            continue;
+        };
+        if from == to {
+            continue;
         }
-        shard = shard.saturating_add(SAMPLE_STEP);
+        if let Some((_, previous_end, previous_from, previous_to)) = moved_ranges.last_mut()
+            && previous_end.0.checked_add(1) == Some(start)
+            && previous_from == from
+            && previous_to == to
+        {
+            *previous_end = crate::data::DataIndividualShardId(end);
+        } else {
+            moved_ranges.push((
+                sid,
+                crate::data::DataIndividualShardId(end),
+                from.clone(),
+                to.clone(),
+            ));
+        }
     }
 
     PlacementChange {
@@ -1389,6 +1616,7 @@ pub struct Daemon {
     writer_config: BackgroundWriterConfig,
     start_time: Instant,
     stop_token: Arc<AtomicBool>,
+    background_threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -1417,6 +1645,7 @@ impl Daemon {
             writer_config,
             start_time: Instant::now(),
             stop_token,
+            background_threads: Vec::new(),
         }
     }
 
@@ -1431,8 +1660,8 @@ impl Daemon {
     /// Returns an `Arc<Mutex<Option<BackgroundWriterSnapshot>>>` that is
     /// periodically updated by the writer thread.
     pub fn start_background_writer(
-        &self,
-        control_state: Arc<Mutex<ClusterControlState>>,
+        &mut self,
+        control_state: Arc<dyn crate::control::ControlPlane>,
         node_id: NodeId,
         writer: Arc<Mutex<dyn IptoWriter + Send>>,
     ) -> Arc<Mutex<Option<BackgroundWriterSnapshot>>> {
@@ -1442,7 +1671,7 @@ impl Daemon {
         let config = self.writer_config.clone();
         let stop_token = self.stop_token.clone();
 
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let snapshot = run_background_writer_with_updates(
                 service,
                 control_state,
@@ -1455,7 +1684,14 @@ impl Daemon {
             *bw_snapshot_clone.lock().unwrap() = Some(snapshot);
         });
 
+        self.background_threads.push(thread);
         bw_snapshot
+    }
+
+    pub fn join_background_writers(&mut self) {
+        for thread in self.background_threads.drain(..) {
+            let _ = thread.join();
+        }
     }
 
     /// Blocks the calling thread serving HTTP health requests.
@@ -1488,17 +1724,17 @@ impl Daemon {
     pub fn snapshot(
         &self,
         background_writer: &Arc<Mutex<Option<BackgroundWriterSnapshot>>>,
-    ) -> DaemonSnapshot {
+    ) -> Result<DaemonSnapshot, VannakServiceError> {
         let svc = self.service.lock().unwrap();
-        DaemonSnapshot {
-            service: svc.snapshot(),
+        Ok(DaemonSnapshot {
+            service: svc.snapshot()?,
             background_writer: background_writer
                 .lock()
                 .ok()
                 .and_then(|guard| guard.clone()),
             segment_discovery: None,
             uptime_secs: self.start_time.elapsed().as_secs(),
-        }
+        })
     }
 }
 
@@ -1522,6 +1758,346 @@ mod tests {
     use crate::process::{EnvironmentId, PipelineId, ProcessInstanceId, TenantId};
     use crate::storage::{SegmentId, SegmentWriter};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn placement_change_covers_the_full_ring_without_scanning_shards() {
+        let map = |epoch, target| {
+            IptoPlacementMap::new(
+                PlacementEpoch(epoch),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from(target), 16).unwrap()],
+                vec![],
+            )
+            .unwrap()
+        };
+        let change = detect_placement_change(&map(1, "old"), &map(2, "new"));
+        assert_eq!(
+            change.moved_ranges,
+            vec![(
+                crate::data::DataIndividualShardId(0),
+                crate::data::DataIndividualShardId(u64::MAX),
+                IptoInstanceId::from("old"),
+                IptoInstanceId::from("new")
+            )]
+        );
+    }
+
+    #[test]
+    fn placement_change_preserves_source_target_pairs_and_inclusive_endpoints() {
+        use crate::cluster::IptoPlacementRange;
+        use crate::data::DataIndividualShardId as Shard;
+        let range = |start, end, target| {
+            IptoPlacementRange::new(Shard(start), Shard(end), IptoInstanceId::from(target)).unwrap()
+        };
+        let map = |epoch, overrides| {
+            IptoPlacementMap::new(
+                PlacementEpoch(epoch),
+                vec![IptoPlacementSlot::new(IptoInstanceId::from("base"), 1).unwrap()],
+                overrides,
+            )
+            .unwrap()
+        };
+        let old = map(1, vec![range(0, 9, "a"), range(10, 19, "b")]);
+        let new = map(2, vec![range(0, 19, "c"), range(u64::MAX, u64::MAX, "d")]);
+        assert_eq!(
+            detect_placement_change(&old, &new).moved_ranges,
+            vec![
+                (
+                    Shard(0),
+                    Shard(9),
+                    IptoInstanceId::from("a"),
+                    IptoInstanceId::from("c")
+                ),
+                (
+                    Shard(10),
+                    Shard(19),
+                    IptoInstanceId::from("b"),
+                    IptoInstanceId::from("c")
+                ),
+                (
+                    Shard(u64::MAX),
+                    Shard(u64::MAX),
+                    IptoInstanceId::from("base"),
+                    IptoInstanceId::from("d")
+                ),
+            ]
+        );
+    }
+
+    fn post_to_service(
+        service: &Arc<Mutex<VannakService>>,
+        path: &str,
+        body: &str,
+    ) -> (String, Value) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let service = service.clone();
+        let thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_health_request(
+                stream,
+                &service,
+                &Arc::new(Mutex::new(None)),
+                &DaemonConfig::default(),
+                Instant::now(),
+            );
+        });
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        thread.join().unwrap();
+        let (headers, body) = reply.split_once("\r\n\r\n").unwrap();
+        (
+            headers.lines().next().unwrap().into(),
+            serde_json::from_str(body).unwrap(),
+        )
+    }
+
+    #[cfg(feature = "sitas-runtime")]
+    #[test]
+    fn http_and_kafka_share_journaled_shard_state_and_recover_metadata() {
+        let dir = tempdir();
+        let outbox = dir.join("outbox.seg");
+        let journal = dir.join("process.seg");
+        let placement = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 1).unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let mut runtime =
+            crate::SitasShardRuntime::start(crate::SitasRuntimeConfig::new(2, 16)).unwrap();
+        runtime.start_mailbox_workers().unwrap();
+        let runtime = Arc::new(runtime);
+        let svc = VannakService::create(
+            placement.clone(),
+            IptoMapping::new("v1"),
+            &outbox,
+            SegmentId::from("outbox"),
+            NodeId::from("node-a"),
+        )
+        .unwrap()
+        .with_sitas_runtime(runtime.clone())
+        .unwrap()
+        .with_process_event_journal(
+            crate::ProcessEventJournal::create(
+                &journal,
+                SegmentId::from("journal"),
+                NodeId::from("node-a"),
+            )
+            .unwrap(),
+        );
+        let service = Arc::new(Mutex::new(svc));
+        let body = r#"{"event_id":"http-1","process_instance_id":"http-instance","pipeline_id":"pipe","kind":"ProcessStarted","timestamp":"2026-07-01T10:00:00Z"}"#;
+        assert!(post_to_service(&service, "/ingest", body).0.contains("200"));
+        let event = parse_ingest_event_json(r#"{"event_id":"kafka-1","process_instance_id":"kafka-instance","pipeline_id":"pipe","kind":"ProcessStarted","timestamp":"2026-07-01T10:00:01Z"}"#).unwrap();
+        let mut pending = crate::KafkaPendingRecord::new(crate::KafkaProcessRecord::new(
+            crate::KafkaTopicPartition::new("process-events-pipe", 0),
+            crate::KafkaOffset(7),
+            event,
+        ));
+        let admitted = service
+            .lock()
+            .unwrap()
+            .submit_kafka_record(&mut pending)
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.next_commit_offset, crate::KafkaOffset(8));
+        assert!(admitted.journal_offset.is_some());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (_, result) = post_to_service(
+                &service,
+                "/query",
+                r#"{"type":"ProcessInstance","process_instance_id":"kafka-instance"}"#,
+            );
+            if result["instance"].as_array().unwrap().len() == 1 {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            crate::replay_process_event_segment(&journal)
+                .unwrap()
+                .events
+                .len(),
+            2
+        );
+        let metadata = r#"{"metadata_event_id":"m1","data_individual_id":"data-1","tenant_id":"t","environment_id":"e","pipeline_id":"pipe","process_instance_id":"http-instance","timestamp":"2026-07-01T10:00:02Z","operation":"Received","passive_metadata":{"unmapped":"preserve me"},"active_metadata":{"validated":true}}"#;
+        assert_eq!(
+            post_to_service(&service, "/ingest/metadata", metadata).1["status"],
+            "accepted"
+        );
+        assert_eq!(
+            post_to_service(&service, "/ingest/metadata", metadata).1["status"],
+            "duplicate"
+        );
+        assert!(
+            post_to_service(&service, "/ingest/metadata", "{}")
+                .0
+                .contains("400")
+        );
+        drop(service);
+        Arc::try_unwrap(runtime).ok().unwrap().stop().unwrap();
+        let mut recovered = VannakService::recover_after(
+            placement,
+            IptoMapping::new("v1"),
+            &outbox,
+            SegmentId::from("outbox"),
+            NodeId::from("node-a"),
+            None,
+        )
+        .unwrap()
+        .service;
+        recovered
+            .recover_process_events_into_hot_index(&journal)
+            .unwrap();
+        let service = Arc::new(Mutex::new(recovered));
+        let (_, result) = post_to_service(
+            &service,
+            "/query",
+            r#"{"type":"Pipeline","pipeline_id":"pipe"}"#,
+        );
+        assert_eq!(result["instance"].as_array().unwrap().len(), 2);
+        let (_, result) = post_to_service(
+            &service,
+            "/query",
+            r#"{"type":"DataIndividualMetadata","data_individual_id":"data-1"}"#,
+        );
+        assert_eq!(result["events"].as_array().unwrap().len(), 1);
+        let recovered = service.lock().unwrap();
+        let crate::QueryResult::MetadataEvents(events) =
+            recovered.metadata_for_data_individual(&crate::DataIndividualMetadataQuery {
+                data_individual_id: DataIndividualId::from("data-1"),
+                limit: crate::QueryLimit::DEFAULT,
+            })
+        else {
+            panic!("metadata query");
+        };
+        assert_eq!(
+            events[0]
+                .passive_metadata()
+                .fields()
+                .get(&crate::MetadataFieldName::from("unmapped")),
+            Some(&MetadataValue::string("preserve me"))
+        );
+    }
+
+    #[test]
+    fn background_writer_retries_transient_delivery_and_failed_checkpoint_proposal() {
+        use crate::control::ControlPlane;
+        #[derive(Debug)]
+        struct FlakyControl {
+            state: Arc<Mutex<ClusterControlState>>,
+            reject_checkpoint: AtomicBool,
+        }
+        impl ControlPlane for FlakyControl {
+            fn read(&self) -> Result<ClusterControlState, String> {
+                Ok(self.state.lock().unwrap().clone())
+            }
+            fn propose(&self, command: ClusterControlCommand) -> Result<(), String> {
+                if matches!(&command, ClusterControlCommand::RecordOutboxCheckpoint(_))
+                    && self.reject_checkpoint.swap(false, Ordering::Relaxed)
+                {
+                    return Err("temporary quorum failure".into());
+                }
+                self.state
+                    .lock()
+                    .unwrap()
+                    .apply(command)
+                    .map_err(|error| error.to_string())
+            }
+        }
+        struct FlakyWriter {
+            attempts: usize,
+        }
+        impl IptoWriter for FlakyWriter {
+            fn write(&mut self, _: &crate::IptoWritePayload) -> Result<(), crate::IptoWriteError> {
+                self.attempts += 1;
+                if self.attempts == 1 {
+                    Err(crate::IptoWriteError::retryable("offline"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let dir = tempdir();
+        let target = IptoInstanceId::from("ipto-a");
+        let node = NodeId::from("node-a");
+        let placement = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(target.clone(), 1).unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let mut svc = VannakService::create(
+            placement.clone(),
+            IptoMapping::new("v1"),
+            dir.join("outbox.seg"),
+            SegmentId::from("outbox"),
+            node.clone(),
+        )
+        .unwrap();
+        let event = parse_metadata_event_json(r#"{"metadata_event_id":"retry","data_individual_id":"d","tenant_id":"t","environment_id":"e","pipeline_id":"p","process_instance_id":"i","timestamp":"2026-07-01T10:00:00Z","operation":"Received"}"#).unwrap();
+        svc.capture_metadata_event(&event).unwrap();
+        let state = Arc::new(Mutex::new(ClusterControlState::new()));
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .apply(ClusterControlCommand::AddNode(node.clone()))
+                .unwrap();
+            state
+                .apply(ClusterControlCommand::SetIptoPlacementMap(placement))
+                .unwrap();
+            state
+                .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
+                    target: target.clone(),
+                    holder: node.clone(),
+                    epoch: LeaseEpoch(1),
+                }))
+                .unwrap();
+        }
+        let control = Arc::new(FlakyControl {
+            state: state.clone(),
+            reject_checkpoint: AtomicBool::new(true),
+        });
+        let writer = Arc::new(Mutex::new(FlakyWriter { attempts: 0 }));
+        let mut daemon = Daemon::new(
+            svc,
+            DaemonConfig::default(),
+            BackgroundWriterConfig {
+                interval: Duration::from_millis(10),
+                ..Default::default()
+            },
+        );
+        let snapshot = daemon.start_background_writer(control, node, writer.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while state
+            .lock()
+            .unwrap()
+            .outbox_checkpoint(event.data_individual_shard_id(), &target)
+            .is_none()
+        {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        daemon.stop();
+        daemon.join_background_writers();
+        assert_eq!(writer.lock().unwrap().attempts, 2);
+        let snapshot = snapshot.lock().unwrap().clone().unwrap();
+        assert_eq!(snapshot.total_failed, 1);
+        assert_eq!(snapshot.total_acknowledged, 1);
+    }
 
     // -- segment discovery --
 
@@ -1728,7 +2304,7 @@ mod tests {
         assert!(!daemon.is_stopping());
 
         let bw_snap = Arc::new(Mutex::new(None::<BackgroundWriterSnapshot>));
-        let snap = daemon.snapshot(&bw_snap);
+        let snap = daemon.snapshot(&bw_snap).unwrap();
         assert_eq!(snap.uptime_secs, 0);
         assert!(snap.service.hot_index.event_count == 0);
 
@@ -1804,7 +2380,7 @@ mod tests {
         );
 
         svc.capture_metadata_event(&event).unwrap();
-        assert_eq!(svc.snapshot().metadata_outbox.outbox.pending, 1);
+        assert_eq!(svc.snapshot().unwrap().metadata_outbox.outbox.pending, 1);
 
         let mut control = ClusterControlState::new();
         control
@@ -1850,7 +2426,7 @@ mod tests {
             NodeId::from("node-a"),
         )
         .unwrap();
-        let daemon = Daemon::new(
+        let mut daemon = Daemon::new(
             svc,
             DaemonConfig::default(),
             BackgroundWriterConfig {
@@ -1918,7 +2494,7 @@ mod tests {
         let shard_id = event.data_individual_shard_id();
         svc.capture_metadata_event(&event).unwrap();
 
-        let daemon = Daemon::new(
+        let mut daemon = Daemon::new(
             svc,
             DaemonConfig::default(),
             BackgroundWriterConfig {

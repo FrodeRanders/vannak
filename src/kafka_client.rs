@@ -374,11 +374,24 @@ impl KafkaProcessConsumer {
     pub fn poll_once(
         &mut self,
         runtime: &SitasShardRuntime,
-        journal: Option<&mut ProcessEventJournal>,
+        mut journal: Option<&mut ProcessEventJournal>,
+    ) -> Result<Option<KafkaSubmitOutcome>, KafkaClientError> {
+        self.poll_with_sink(|pending| {
+            try_submit_kafka_pending_record(runtime, journal.as_deref_mut(), pending)
+        })
+    }
+
+    /// Poll into a typed service sink. Offsets commit only after that sink
+    /// durably admits the record; pending state survives every retry.
+    pub fn poll_with_sink(
+        &mut self,
+        mut sink: impl FnMut(
+            &mut KafkaPendingRecord,
+        ) -> Result<Option<KafkaSubmitOutcome>, KafkaIngestError>,
     ) -> Result<Option<KafkaSubmitOutcome>, KafkaClientError> {
         self.apply_rebalance_state()?;
         if !self.pending.is_empty() {
-            return self.retry_pending(runtime, journal);
+            return self.retry_pending_with(&mut sink);
         }
 
         let Some(result) = self.consumer.poll(self.config.poll_timeout) else {
@@ -399,7 +412,7 @@ impl KafkaProcessConsumer {
             event,
         );
         self.pending.push_back(KafkaPendingRecord::new(record));
-        self.retry_pending(runtime, journal)
+        self.retry_pending_with(&mut sink)
     }
 
     /// Polls records until `max_records` have been accepted or a poll returns no
@@ -424,25 +437,24 @@ impl KafkaProcessConsumer {
         Ok(outcomes)
     }
 
-    fn retry_pending(
+    fn retry_pending_with(
         &mut self,
-        runtime: &SitasShardRuntime,
-        journal: Option<&mut ProcessEventJournal>,
+        sink: &mut impl FnMut(
+            &mut KafkaPendingRecord,
+        ) -> Result<Option<KafkaSubmitOutcome>, KafkaIngestError>,
     ) -> Result<Option<KafkaSubmitOutcome>, KafkaClientError> {
-        let Some(mut pending) = self.pending.pop_front() else {
+        let Some(pending) = self.pending.front_mut() else {
             return Ok(None);
         };
-
-        let outcome = try_submit_kafka_pending_record(runtime, journal, &mut pending)?;
+        let outcome = sink(pending)?;
         let Some(outcome) = outcome else {
             let topic_partition = pending.topic_partition().clone();
-            self.pending.push_front(pending);
             self.pause_partition(&topic_partition)?;
             return Ok(None);
         };
-
         self.resume_partition(&outcome.topic_partition)?;
         self.commit_offset(&outcome.topic_partition, outcome.next_commit_offset)?;
+        self.pending.pop_front();
         self.total_accepted += 1;
         Ok(Some(outcome))
     }

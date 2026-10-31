@@ -72,6 +72,7 @@ machine without taking the write lock.
 
 \begin{lstlisting}
 pub enum ClusterQuery {
+    ControlSnapshot,
     ResolveTarget { shard_id: u64 },
     ResolveWithFallback { shard_id: u64 },
     ListIptoInstances,
@@ -106,8 +107,10 @@ Section~\ref{sec:topology}.
 \texttt{GrantWriterLease} requires the holder to be a known node
 (\texttt{UnknownLeaseHolder} otherwise) and a strictly greater
 \texttt{LeaseEpoch} than any current lease for the target
-(\texttt{StaleLeaseEpoch} otherwise). This gives single-writer authority per
-\ipto{} target with monotonic fencing.
+(\texttt{StaleLeaseEpoch} otherwise). This records writer authority per
+\ipto{} target with monotonic epochs. Epochs do not fence an external database
+call already in progress; ownership transfer must first quiesce the old holder
+and arrange durable outbox access.
 
 \subsection{Checkpoint Lifecycle}
 
@@ -211,3 +214,16 @@ previous epochs. For metadata that must move, outbox segment replay delivers
 the affected shard ranges to the new target (see Section~\ref{sec:rebalancing}).
 
 \endinput
+
+\subsection{Supervisor Control Access}
+
+With \texttt{--raft}, the supervisor reads control snapshots through the leader's
+linearizable read barrier and proposes checkpoints through the committed command
+path. Followers forward requests to the leader. There is no fallback to locally
+granted writer leases when quorum is unavailable. Initial leases are committed
+deterministically at bootstrap and are not reassigned automatically after a
+failure. The outbox node id must equal the Raft peer id.
+
+The accept loop continues after idle polling timeouts. The election timeout is
+3000 ms, above the active runtime's 750 ms heartbeat interval. Shutdown joins
+Kafka and writer threads before stopping the Raft runtime.

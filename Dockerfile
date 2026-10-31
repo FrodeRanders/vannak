@@ -17,7 +17,7 @@ ARG RUST_VERSION=1.95
 FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    pkg-config libssl-dev protobuf-compiler \
+    build-essential pkg-config libssl-dev protobuf-compiler zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -44,7 +44,7 @@ COPY sitas/src/ sitas/src/
 COPY ipto/implementations/rust ipto/implementations/rust/
 
 RUN cargo build --manifest-path vannak/Cargo.toml --release \
-        --features node,daemon --bin vannak \
+        --features node,daemon,kafka-client,ipto-writer --bin vannak \
     && mv vannak/target/release/vannak /usr/local/bin/vannak \
     && cargo clean --manifest-path vannak/Cargo.toml
 
@@ -54,7 +54,7 @@ RUN cargo build --manifest-path vannak/Cargo.toml --release \
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl dnsutils \
+    ca-certificates curl dnsutils zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/vannak /usr/local/bin/vannak

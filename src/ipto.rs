@@ -138,6 +138,8 @@ pub struct IptoWritePayload {
     pub idempotency_key: IdempotencyKey,
     pub mapping_version: String,
     pub attributes: BTreeMap<IptoAttributeName, MetadataValue>,
+    /// Original provenance fact, preserved independently of the Ipto mapping.
+    pub provenance: Option<DataIndividualMetadataEvent>,
 }
 
 impl IptoWritePayload {
@@ -174,6 +176,7 @@ impl IptoWritePayload {
             idempotency_key: event.idempotency_key().clone(),
             mapping_version: mapping.version().to_string(),
             attributes,
+            provenance: Some(event.clone()),
         }
     }
 
@@ -193,6 +196,10 @@ impl IptoWritePayload {
             write_string(&mut out, attribute.as_str());
             write_metadata_value(&mut out, value);
         }
+        if let Some(event) = &self.provenance {
+            out.extend_from_slice(b"VMD1");
+            encode_provenance(&mut out, event);
+        }
         out
     }
 
@@ -209,6 +216,14 @@ impl IptoWritePayload {
             let value = cursor.read_metadata_value()?;
             attributes.insert(attribute, value);
         }
+        let provenance = if cursor.pos == bytes.len() {
+            None
+        } else {
+            if cursor.read_exact(4)? != b"VMD1" {
+                return Err(IptoPayloadDecodeError::InvalidValueTag(255));
+            }
+            Some(decode_provenance(&mut cursor)?)
+        };
         cursor.finish()?;
 
         Ok(Self {
@@ -217,6 +232,7 @@ impl IptoWritePayload {
             idempotency_key,
             mapping_version,
             attributes,
+            provenance,
         })
     }
 }
@@ -258,6 +274,7 @@ pub struct MetadataOutboxEntry {
     record_offset: Option<RecordOffset>,
     retry_count: u32,
     last_error: Option<String>,
+    retryable: bool,
 }
 
 impl MetadataOutboxEntry {
@@ -315,6 +332,7 @@ impl MetadataOutbox {
                 record_offset,
                 retry_count: 0,
                 last_error: None,
+                retryable: false,
             },
         );
         self.pending.push_back(key);
@@ -345,14 +363,43 @@ impl MetadataOutbox {
     }
 
     pub fn fail(&mut self, key: &IdempotencyKey, error: impl Into<String>) -> bool {
+        self.fail_with_retryability(key, error, false)
+    }
+
+    fn fail_with_retryability(
+        &mut self,
+        key: &IdempotencyKey,
+        error: impl Into<String>,
+        retryable: bool,
+    ) -> bool {
         let Some(entry) = self.entries.get_mut(key) else {
             return false;
         };
         entry.status = OutboxStatus::Failed;
         entry.retry_count += 1;
         entry.last_error = Some(error.into());
+        entry.retryable = retryable;
         self.pending.retain(|pending_key| pending_key != key);
         true
+    }
+
+    /// Requeue transient failures once per writer cycle. Permanent failures
+    /// remain parked until an operator explicitly retries them.
+    pub fn retry_failed_for_target(&mut self, target: &IptoInstanceId) -> usize {
+        let keys: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.status == OutboxStatus::Failed
+                    && entry.retryable
+                    && &entry.payload.target == target
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &keys {
+            self.retry_failed(key);
+        }
+        keys.len()
     }
 
     pub fn retry_failed(&mut self, key: &IdempotencyKey) -> bool {
@@ -404,24 +451,28 @@ impl MetadataOutbox {
         segment_id: SegmentId,
         epoch: CheckpointEpoch,
     ) -> Option<MetadataOutboxCheckpoint> {
-        self.entries
+        let mut entries: Vec<_> = self
+            .entries
             .values()
             .filter(|entry| {
-                entry.status == OutboxStatus::Acknowledged && entry.payload.target == *target
+                entry.payload.target == *target
+                    && entry.payload.shard_id == data_individual_shard_id
             })
-            .filter(|entry| entry.payload.shard_id == data_individual_shard_id)
-            .filter_map(|entry| Some((entry.record_offset?, entry.payload.mapping_version.clone())))
-            .max_by_key(|(offset, _)| *offset)
-            .map(
-                |(last_acknowledged_offset, mapping_version)| MetadataOutboxCheckpoint {
-                    data_individual_shard_id,
-                    target: target.clone(),
-                    segment_id,
-                    last_acknowledged_offset,
-                    mapping_version,
-                    epoch,
-                },
-            )
+            .filter_map(|entry| entry.record_offset.map(|offset| (offset, entry)))
+            .collect();
+        entries.sort_by_key(|(offset, _)| *offset);
+        let (last_acknowledged_offset, entry) = entries
+            .into_iter()
+            .take_while(|(_, entry)| entry.status == OutboxStatus::Acknowledged)
+            .last()?;
+        Some(MetadataOutboxCheckpoint {
+            data_individual_shard_id,
+            target: target.clone(),
+            segment_id,
+            last_acknowledged_offset,
+            mapping_version: entry.payload.mapping_version.clone(),
+            epoch,
+        })
     }
 
     fn acknowledged_checkpoints_for_target(
@@ -430,38 +481,17 @@ impl MetadataOutbox {
         segment_id: SegmentId,
         epoch: CheckpointEpoch,
     ) -> Vec<MetadataOutboxCheckpoint> {
-        let mut latest: BTreeMap<DataIndividualShardId, (RecordOffset, String)> = BTreeMap::new();
-
-        for entry in self.entries.values().filter(|entry| {
-            entry.status == OutboxStatus::Acknowledged && entry.payload.target == *target
-        }) {
-            let Some(offset) = entry.record_offset else {
-                continue;
-            };
-            let key = entry.payload.shard_id;
-            let value = (offset, entry.payload.mapping_version.clone());
-            if latest
-                .get(&key)
-                .is_none_or(|(current_offset, _)| offset > *current_offset)
-            {
-                latest.insert(key, value);
-            }
-        }
-
-        latest
+        let shards: std::collections::BTreeSet<_> = self
+            .entries
+            .values()
+            .filter(|entry| &entry.payload.target == target)
+            .map(|entry| entry.payload.shard_id)
+            .collect();
+        shards
             .into_iter()
-            .map(
-                |(data_individual_shard_id, (last_acknowledged_offset, mapping_version))| {
-                    MetadataOutboxCheckpoint {
-                        data_individual_shard_id,
-                        target: target.clone(),
-                        segment_id: segment_id.clone(),
-                        last_acknowledged_offset,
-                        mapping_version,
-                        epoch,
-                    }
-                },
-            )
+            .filter_map(|shard| {
+                self.acknowledged_checkpoint(shard, target, segment_id.clone(), epoch)
+            })
             .collect()
     }
 }
@@ -559,7 +589,7 @@ pub fn deliver_next_pending(
         Err(error) => {
             let retryable = error.is_retryable();
             let message = error.message().to_string();
-            outbox.fail(&key, message.clone());
+            outbox.fail_with_retryability(&key, message.clone(), retryable);
             MetadataOutboxDeliveryResult::Failed {
                 idempotency_key: key,
                 retryable,
@@ -592,7 +622,7 @@ pub fn deliver_next_pending_for_target(
         Err(error) => {
             let retryable = error.is_retryable();
             let message = error.message().to_string();
-            outbox.fail(&key, message.clone());
+            outbox.fail_with_retryability(&key, message.clone(), retryable);
             MetadataOutboxDeliveryResult::Failed {
                 idempotency_key: key,
                 retryable,
@@ -729,10 +759,8 @@ impl SegmentBackedMetadataOutbox {
 
         let offset = self.writer.append_record(&payload.encode())?;
         self.writer.sync()?;
-        debug_assert_eq!(
-            self.outbox.enqueue_with_offset(payload, Some(offset)),
-            OutboxEnqueueResult::Enqueued
-        );
+        let result = self.outbox.enqueue_with_offset(payload, Some(offset));
+        debug_assert_eq!(result, OutboxEnqueueResult::Enqueued);
         Ok(DurableOutboxEnqueueResult::Enqueued { offset })
     }
 
@@ -965,6 +993,158 @@ pub struct MetadataOutboxReplaySummary {
     pub replayed_records: usize,
 }
 
+fn encode_optional_string(out: &mut Vec<u8>, value: Option<&str>) {
+    out.push(u8::from(value.is_some()));
+    if let Some(value) = value {
+        write_string(out, value);
+    }
+}
+
+fn encode_provenance(out: &mut Vec<u8>, event: &DataIndividualMetadataEvent) {
+    use crate::data::MetadataOperation;
+    for value in [
+        event.metadata_event_id().as_str(),
+        event.data_individual_id().as_str(),
+        event.tenant_id().as_str(),
+        event.environment_id().as_str(),
+        event.pipeline_id().as_str(),
+        event.process_instance_id().as_str(),
+        event.timestamp().as_str(),
+    ] {
+        write_string(out, value);
+    }
+    write_u64(out, event.data_individual_shard_id().0);
+    encode_optional_string(out, event.activity_id().map(|id| id.as_str()));
+    encode_optional_string(out, event.source_payload_ref().map(|id| id.as_str()));
+    match event.operation() {
+        MetadataOperation::Created => out.push(0),
+        MetadataOperation::Received => out.push(1),
+        MetadataOperation::Transformed {
+            plugin_name,
+            plugin_version,
+        } => {
+            out.push(2);
+            encode_optional_string(out, plugin_name.as_ref().map(|id| id.as_str()));
+            encode_optional_string(out, plugin_version.as_ref().map(|id| id.as_str()));
+        }
+        MetadataOperation::Masked { fields } => {
+            out.push(3);
+            write_metadata_value(out, &MetadataValue::StringList(fields.clone()));
+        }
+        MetadataOperation::Validated { passed } => {
+            out.push(4);
+            out.push(u8::from(*passed));
+        }
+        MetadataOperation::Enriched { source } => {
+            out.push(5);
+            encode_optional_string(out, source.as_deref());
+        }
+        MetadataOperation::Routed => out.push(6),
+        MetadataOperation::Persisted => out.push(7),
+    }
+    for fields in [
+        event.passive_metadata().fields(),
+        event.active_metadata().fields(),
+    ] {
+        write_u32(out, fields.len() as u32);
+        for (key, value) in fields {
+            write_string(out, key.as_str());
+            write_metadata_value(out, value);
+        }
+    }
+}
+
+fn decode_optional_string(
+    cursor: &mut DecodeCursor<'_>,
+) -> Result<Option<String>, IptoPayloadDecodeError> {
+    match cursor.read_u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(cursor.read_string()?)),
+        tag => Err(IptoPayloadDecodeError::InvalidValueTag(tag)),
+    }
+}
+
+fn decode_provenance(
+    cursor: &mut DecodeCursor<'_>,
+) -> Result<DataIndividualMetadataEvent, IptoPayloadDecodeError> {
+    use crate::data::*;
+    use crate::process::*;
+    let event_id = MetadataEventId::from(cursor.read_string()?);
+    let data_id = DataIndividualId::from(cursor.read_string()?);
+    let tenant = TenantId::from(cursor.read_string()?);
+    let environment = EnvironmentId::from(cursor.read_string()?);
+    let pipeline = PipelineId::from(cursor.read_string()?);
+    let process = ProcessInstanceId::from(cursor.read_string()?);
+    let timestamp = EventTimestamp::from(cursor.read_string()?);
+    let shard = DataIndividualShardId(cursor.read_u64()?);
+    let activity = decode_optional_string(cursor)?;
+    let payload_ref = decode_optional_string(cursor)?;
+    let operation = match cursor.read_u8()? {
+        0 => MetadataOperation::Created,
+        1 => MetadataOperation::Received,
+        2 => MetadataOperation::Transformed {
+            plugin_name: decode_optional_string(cursor)?.map(PluginName::from),
+            plugin_version: decode_optional_string(cursor)?.map(PluginVersion::from),
+        },
+        3 => match cursor.read_metadata_value()? {
+            MetadataValue::StringList(fields) => MetadataOperation::Masked { fields },
+            _ => return Err(IptoPayloadDecodeError::InvalidValueTag(255)),
+        },
+        4 => MetadataOperation::Validated {
+            passed: cursor.read_u8()? != 0,
+        },
+        5 => MetadataOperation::Enriched {
+            source: decode_optional_string(cursor)?,
+        },
+        6 => MetadataOperation::Routed,
+        7 => MetadataOperation::Persisted,
+        tag => return Err(IptoPayloadDecodeError::InvalidValueTag(tag)),
+    };
+    let mut passive = PassiveMetadata::new();
+    for _ in 0..cursor.read_u32()? {
+        passive = passive.insert(cursor.read_string()?, cursor.read_metadata_value()?);
+    }
+    let mut active = ActiveMetadata::new();
+    for _ in 0..cursor.read_u32()? {
+        active = active.insert(cursor.read_string()?, cursor.read_metadata_value()?);
+    }
+    let mut event = DataIndividualMetadataEvent::new(
+        event_id,
+        data_id,
+        shard,
+        tenant,
+        environment,
+        pipeline,
+        process,
+        timestamp,
+        operation,
+    )
+    .with_passive_metadata(passive)
+    .with_active_metadata(active);
+    if let Some(activity) = activity {
+        event = event.with_activity_id(ActivityId::from(activity));
+    }
+    if let Some(payload_ref) = payload_ref {
+        event = event.with_source_payload_ref(PayloadRef::from(payload_ref));
+    }
+    Ok(event)
+}
+
+/// Replay the original metadata facts, including acknowledged records. Legacy
+/// payload-only segments remain deliverable but cannot reconstruct provenance.
+pub fn replay_provenance(
+    path: impl AsRef<Path>,
+) -> Result<crate::data::DataProvenanceIndex, MetadataOutboxStorageError> {
+    let mut reader = SegmentReader::open(path)?;
+    let mut index = crate::data::DataProvenanceIndex::new();
+    while let Some(record) = reader.read_next()? {
+        if let Some(event) = IptoWritePayload::decode(&record.payload)?.provenance {
+            index.ingest(event);
+        }
+    }
+    Ok(index)
+}
+
 fn write_u32(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
@@ -1113,6 +1293,127 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn automatic_retry_is_scoped_and_does_not_requeue_permanent_failures() {
+        let mut outbox = MetadataOutbox::new();
+        let first = sample_payload();
+        let mut second = first.clone();
+        second.idempotency_key = IdempotencyKey::from("permanent");
+        let mut third = first.clone();
+        third.idempotency_key = IdempotencyKey::from("other");
+        third.target = IptoInstanceId::from("other");
+        outbox.enqueue(first.clone());
+        outbox.enqueue(second.clone());
+        outbox.enqueue(third.clone());
+        outbox.fail_with_retryability(&first.idempotency_key, "offline", true);
+        outbox.fail_with_retryability(&second.idempotency_key, "bad mapping", false);
+        outbox.fail_with_retryability(&third.idempotency_key, "offline", true);
+        assert_eq!(outbox.retry_failed_for_target(&first.target), 1);
+        let mut writer = RecordingWriter::default();
+        assert_eq!(
+            drain_pending_outbox_for_target(&mut outbox, &first.target, &mut writer, 10)
+                .acknowledged,
+            1
+        );
+        assert_eq!(outbox.snapshot().failed, 2);
+        assert_eq!(writer.written, vec![first]);
+    }
+
+    #[test]
+    fn checkpoint_does_not_skip_an_earlier_failed_record() {
+        let path = temp_segment_path("checkpoint-gap");
+        let mut outbox =
+            SegmentBackedMetadataOutbox::create(&path, SegmentId::from("s"), NodeId::from("n"))
+                .unwrap();
+        let first = sample_payload();
+        let mut second = first.clone();
+        second.idempotency_key = IdempotencyKey::from("second");
+        outbox.enqueue_durable(first.clone()).unwrap();
+        outbox.enqueue_durable(second.clone()).unwrap();
+        outbox
+            .outbox_mut()
+            .fail(&first.idempotency_key, "permanent");
+        outbox.outbox_mut().acknowledge(&second.idempotency_key);
+        assert!(
+            outbox
+                .acknowledged_checkpoint(first.shard_id, &first.target, CheckpointEpoch(1))
+                .is_none()
+        );
+        assert!(
+            outbox
+                .acknowledged_checkpoints_for_target(&first.target, CheckpointEpoch(1))
+                .is_empty()
+        );
+        outbox.outbox_mut().retry_failed(&first.idempotency_key);
+        outbox.outbox_mut().acknowledge(&first.idempotency_key);
+        assert_eq!(
+            outbox
+                .acknowledged_checkpoints_for_target(&first.target, CheckpointEpoch(2))
+                .len(),
+            1
+        );
+        drop(outbox);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn payload_codec_preserves_all_provenance_operations_and_reads_legacy_records() {
+        use crate::data::{MetadataOperation, PayloadRef, PluginName, PluginVersion};
+        let original = sample_event();
+        for operation in [
+            MetadataOperation::Created,
+            MetadataOperation::Received,
+            MetadataOperation::Transformed {
+                plugin_name: Some(PluginName::from("mask")),
+                plugin_version: Some(PluginVersion::from("v2")),
+            },
+            MetadataOperation::Masked {
+                fields: vec!["ssn".into()],
+            },
+            MetadataOperation::Validated { passed: false },
+            MetadataOperation::Enriched {
+                source: Some("lookup".into()),
+            },
+            MetadataOperation::Routed,
+            MetadataOperation::Persisted,
+        ] {
+            let event = DataIndividualMetadataEvent::new(
+                original.metadata_event_id().clone(),
+                original.data_individual_id().clone(),
+                original.data_individual_shard_id(),
+                original.tenant_id().clone(),
+                original.environment_id().clone(),
+                original.pipeline_id().clone(),
+                original.process_instance_id().clone(),
+                original.timestamp().clone(),
+                operation,
+            )
+            .with_activity_id(crate::process::ActivityId::from("transform"))
+            .with_source_payload_ref(PayloadRef::from("s3://source/object"))
+            .with_passive_metadata(
+                crate::data::PassiveMetadata::new()
+                    .insert("source", MetadataValue::string("private")),
+            )
+            .with_active_metadata(
+                crate::data::ActiveMetadata::new().insert("passed", MetadataValue::Boolean(false)),
+            );
+            let payload = IptoWritePayload::from_event(
+                &event,
+                &IptoInstanceId::from("ipto-a"),
+                &IptoMapping::new("v1"),
+            );
+            assert_eq!(
+                IptoWritePayload::decode(&payload.encode())
+                    .unwrap()
+                    .provenance,
+                Some(event)
+            );
+        }
+        let mut legacy = sample_payload();
+        legacy.provenance = None;
+        assert_eq!(IptoWritePayload::decode(&legacy.encode()).unwrap(), legacy);
+    }
 
     #[test]
     fn placement_maps_data_individual_shards_to_ipto_instances() {

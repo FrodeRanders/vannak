@@ -348,6 +348,17 @@ impl SitasShardRuntime {
     }
 
     /// Runs a process-instance query on the owning Sitas shard.
+    pub fn contains_event(
+        &self,
+        process_instance_id: &ProcessInstanceId,
+        event_id: &crate::ingest::EventId,
+    ) -> Result<bool, SitasRuntimeError> {
+        let shard_id = self.shard_for_process_instance(process_instance_id);
+        let event_id = event_id.clone();
+        self.with_hot_index_on(shard_id, move |index| index.contains_event(&event_id))
+    }
+
+    /// Runs a process-instance query on the owning Sitas shard.
     pub fn process_instance(
         &self,
         query: &ProcessInstanceQuery,

@@ -25,6 +25,7 @@
 //!   VANNAK_KAFKA_INTEGRATION=1 cargo test --features kafka-client --test kafka_integration -- --nocapture
 //!   docker compose -f docker-compose.kafka.yml down -v
 
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rdkafka::ClientConfig;
@@ -65,6 +66,35 @@ fn kafka_durga_json_record_feeds_sitas_workers() {
 
     let mut runtime = SitasShardRuntime::start(SitasRuntimeConfig::new(2, 16)).unwrap();
     runtime.start_mailbox_workers().unwrap();
+    let runtime = Arc::new(runtime);
+    let dir = std::env::temp_dir().join(format!("vannak-kafka-service-{suffix}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let journal_path = dir.join("process.seg");
+    let mut service = vannak::VannakService::create(
+        vannak::IptoPlacementMap::new(
+            vannak::PlacementEpoch(1),
+            vec![
+                vannak::IptoPlacementSlot::new(vannak::IptoInstanceId::from("ipto-a"), 1).unwrap(),
+            ],
+            vec![],
+        )
+        .unwrap(),
+        vannak::IptoMapping::new("v1"),
+        dir.join("outbox.seg"),
+        vannak::SegmentId::from("outbox"),
+        vannak::NodeId::from("node-a"),
+    )
+    .unwrap()
+    .with_sitas_runtime(runtime.clone())
+    .unwrap()
+    .with_process_event_journal(
+        vannak::ProcessEventJournal::create(
+            &journal_path,
+            vannak::SegmentId::from("process"),
+            vannak::NodeId::from("node-a"),
+        )
+        .unwrap(),
+    );
     let mut consumer = KafkaProcessConsumer::start(
         KafkaProcessConsumerConfig::new(&brokers, group_id, [topic.clone()])
             .with_payload_format(KafkaPayloadFormat::DurgaJson)
@@ -81,7 +111,10 @@ fn kafka_durga_json_record_feeds_sitas_workers() {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut accepted = None;
     while Instant::now() < deadline {
-        if let Some(outcome) = consumer.poll_once(&runtime, None).unwrap() {
+        if let Some(outcome) = consumer
+            .poll_with_sink(|pending| service.submit_kafka_record(pending))
+            .unwrap()
+        {
             accepted = Some(outcome);
             break;
         }
@@ -96,9 +129,28 @@ fn kafka_durga_json_record_feeds_sitas_workers() {
     assert_eq!(snapshot.runtime.totals.event_count, 1);
     assert!(consumer.snapshot().rebalance.assignment_count >= 1);
 
+    assert!(outcome.journal_offset.is_some());
+    assert_eq!(
+        vannak::replay_process_event_segment(&journal_path)
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+    assert!(
+        service
+            .process_instance(&vannak::ProcessInstanceQuery {
+                process_instance_id: vannak::ProcessInstanceId::from("instance-kafka-smoke")
+            })
+            .unwrap()
+            .is_some()
+    );
+    drop(service);
+    let mut runtime = Arc::try_unwrap(runtime).ok().unwrap();
     let summaries = runtime.stop_mailbox_workers().unwrap();
     assert_eq!(summaries.iter().map(|(_, s)| s.accepted).sum::<u64>(), 1);
     runtime.stop().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 fn produce_durga_json_record(brokers: &str, topic: &str, process_id: &str) {

@@ -23,6 +23,7 @@
 //! boundaries rather than changing the core event model.
 
 pub mod cluster;
+pub mod control;
 #[cfg(feature = "daemon")]
 pub mod daemon;
 pub mod data;
@@ -37,8 +38,11 @@ pub mod kafka_client;
 #[cfg(feature = "sitas-runtime")]
 pub mod kafka_ingest;
 pub mod metadata;
+#[cfg(feature = "node")]
+pub mod node_control;
 pub mod observability;
 pub mod process;
+pub mod process_index;
 pub mod query;
 #[cfg(feature = "raft")]
 pub mod raft_sm;

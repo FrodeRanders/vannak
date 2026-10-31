@@ -258,6 +258,23 @@ impl DataIndividualMetadataEvent {
         }
     }
 
+    pub fn validate(&self) -> Result<(), crate::ingest::IngestError> {
+        for (field, value) in [
+            ("metadata_event_id", self.metadata_event_id.as_str()),
+            ("data_individual_id", self.data_individual_id.as_str()),
+            ("tenant_id", self.tenant_id.as_str()),
+            ("environment_id", self.environment_id.as_str()),
+            ("pipeline_id", self.pipeline_id.as_str()),
+            ("process_instance_id", self.process_instance_id.as_str()),
+            ("timestamp", self.timestamp.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(crate::ingest::IngestError::EmptyField { field });
+            }
+        }
+        Ok(())
+    }
+
     pub fn with_activity_id(mut self, activity_id: ActivityId) -> Self {
         self.activity_id = Some(activity_id);
         self

@@ -18,9 +18,9 @@
 //! Single-node service orchestration boundary.
 //!
 //! This module wires the dependency-free primitives together without pulling in
-//! external runtimes. It is the bridge between the current library pieces and a
-//! future Sitas-backed service: process events are reduced into a shard-local
-//! hot index, metadata events are placed, mapped, durably enqueued, and drained
+//! external runtimes in the default build. The supervisor attaches an explicit
+//! Sitas process index: process events are reduced on their owning shard,
+//! metadata events are placed, mapped, durably enqueued, and drained
 //! through target-aware writer calls.
 
 use crate::cluster::{
@@ -56,8 +56,9 @@ use std::path::Path;
 /// one value, or equivalent shard-local state, inside each owning shard.
 #[derive(Debug)]
 pub struct VannakService {
-    hot_index: HotIndex,
+    hot_index: crate::process_index::ProcessIndex,
     placement_map: IptoPlacementMap,
+    control_plane: Option<(std::sync::Arc<dyn crate::control::ControlPlane>, NodeId)>,
     mapping: IptoMapping,
     metadata_outbox: SegmentBackedMetadataOutbox,
     provenance_index: DataProvenanceIndex,
@@ -71,8 +72,9 @@ impl VannakService {
         metadata_outbox: SegmentBackedMetadataOutbox,
     ) -> Self {
         Self {
-            hot_index: HotIndex::new(),
+            hot_index: crate::process_index::ProcessIndex::Local(HotIndex::new()),
             placement_map,
+            control_plane: None,
             mapping,
             metadata_outbox,
             provenance_index: DataProvenanceIndex::new(),
@@ -80,9 +82,69 @@ impl VannakService {
         }
     }
 
+    pub fn set_control_plane(
+        &mut self,
+        plane: std::sync::Arc<dyn crate::control::ControlPlane>,
+        node: NodeId,
+    ) {
+        self.control_plane = Some((plane, node));
+    }
+
+    pub fn control_plane(&self) -> Option<std::sync::Arc<dyn crate::control::ControlPlane>> {
+        self.control_plane.as_ref().map(|(plane, _)| plane.clone())
+    }
+
     pub fn with_process_event_journal(mut self, journal: ProcessEventJournal) -> Self {
         self.process_event_journal = Some(journal);
         self
+    }
+
+    /// Move the existing process view onto the supplied shard-owned index.
+    /// Attach before replay or ingest; the same runtime is used by Kafka.
+    #[cfg(feature = "sitas-runtime")]
+    pub fn with_sitas_runtime(
+        mut self,
+        runtime: std::sync::Arc<crate::sitas_runtime::SitasShardRuntime>,
+    ) -> Result<Self, VannakServiceError> {
+        if self.hot_index.snapshot()?.event_count != 0 {
+            return Err(VannakServiceError::ProcessIndexAlreadyPopulated);
+        }
+        self.hot_index = crate::process_index::ProcessIndex::Sitas(
+            crate::process_index::SharedSitasIndex(runtime),
+        );
+        Ok(self)
+    }
+
+    /// The configured journal determines whether public ingest is durable.
+    pub fn ingest_process_event_configured(
+        &mut self,
+        event: PipelineEvent,
+    ) -> Result<IngestOutcome, VannakServiceError> {
+        if self.process_event_journal.is_some() {
+            Ok(self.ingest_process_event_durable(event)?.outcome)
+        } else {
+            self.ingest_process_event(event)
+        }
+    }
+
+    #[cfg(feature = "sitas-runtime")]
+    pub fn submit_kafka_record(
+        &mut self,
+        pending: &mut crate::kafka_ingest::KafkaPendingRecord,
+    ) -> Result<
+        Option<crate::kafka_ingest::KafkaSubmitOutcome>,
+        crate::kafka_ingest::KafkaIngestError,
+    > {
+        let crate::process_index::ProcessIndex::Sitas(index) = &self.hot_index else {
+            return Err(crate::kafka_ingest::KafkaIngestError::Runtime(
+                crate::sitas_runtime::SitasRuntimeError::Stopped,
+            ));
+        };
+        crate::kafka_ingest::try_submit_kafka_pending_record(
+            &index.0,
+            self.process_event_journal.as_mut(),
+            pending,
+        )
     }
 
     pub fn create(
@@ -107,14 +169,17 @@ impl VannakService {
         node_id: NodeId,
         checkpoint_offset: Option<RecordOffset>,
     ) -> Result<VannakServiceRecovery, MetadataOutboxStorageError> {
+        let provenance_index = crate::ipto::replay_provenance(&outbox_path)?;
         let recovery = SegmentBackedMetadataOutbox::recover_after(
             outbox_path,
             outbox_segment_id,
             node_id,
             checkpoint_offset,
         )?;
+        let mut service = Self::new(placement_map, mapping, recovery.outbox);
+        service.provenance_index = provenance_index;
         Ok(VannakServiceRecovery {
-            service: Self::new(placement_map, mapping, recovery.outbox),
+            service,
             summary: recovery.summary,
         })
     }
@@ -122,7 +187,7 @@ impl VannakService {
     pub fn ingest_process_event(
         &mut self,
         event: PipelineEvent,
-    ) -> Result<IngestOutcome, IngestError> {
+    ) -> Result<IngestOutcome, VannakServiceError> {
         self.hot_index.ingest(event)
     }
 
@@ -135,7 +200,7 @@ impl VannakService {
             .process_event_journal
             .as_mut()
             .ok_or(VannakServiceError::ProcessEventJournalNotConfigured)?;
-        if self.hot_index.contains_event(event.event_id()) {
+        if self.hot_index.contains_event(&event)? {
             let offset = RecordOffset(journal.manifest().byte_len);
             return Ok(DurableProcessIngestResult {
                 outcome: IngestOutcome::Duplicate,
@@ -162,6 +227,18 @@ impl VannakService {
         &mut self,
         event: &DataIndividualMetadataEvent,
     ) -> Result<MetadataCaptureResult, VannakServiceError> {
+        event.validate()?;
+        let committed = self
+            .control_plane
+            .as_ref()
+            .map(|(plane, _)| plane.read())
+            .transpose()
+            .map_err(VannakServiceError::ControlPlane)?;
+        if let Some(state) = &committed {
+            self.placement_map = state.placement_map().cloned().ok_or_else(|| {
+                VannakServiceError::ControlPlane("placement is not committed".into())
+            })?;
+        }
         let target = self
             .placement_map
             .resolve(event.data_individual_shard_id())
@@ -169,6 +246,16 @@ impl VannakService {
             .ok_or(VannakServiceError::NoPlacementTarget {
                 shard_id: event.data_individual_shard_id(),
             })?;
+        if let (Some(state), Some((_, node))) = (&committed, &self.control_plane)
+            && state
+                .writer_lease(&target)
+                .is_none_or(|lease| &lease.holder != node)
+        {
+            return Err(VannakServiceError::WriterLeaseNotHeld {
+                target,
+                holder: node.clone(),
+            });
+        }
         let payload = IptoWritePayload::from_event(event, &target, &self.mapping);
         let result = self.metadata_outbox.enqueue_durable(payload)?;
         let _ = self.provenance_index.ingest(event.clone());
@@ -231,9 +318,9 @@ impl VannakService {
             .acknowledged_checkpoints_for_target(target, epoch)
     }
 
-    pub fn snapshot(&self) -> VannakServiceSnapshot {
-        VannakServiceSnapshot {
-            hot_index: self.hot_index.snapshot(),
+    pub fn snapshot(&self) -> Result<VannakServiceSnapshot, VannakServiceError> {
+        Ok(VannakServiceSnapshot {
+            hot_index: self.hot_index.snapshot()?,
             metadata_outbox: self.metadata_outbox.snapshot(),
             provenance_index: self.provenance_index.snapshot(),
             process_event_journal: self
@@ -241,7 +328,7 @@ impl VannakService {
                 .as_ref()
                 .map(ProcessEventJournal::manifest),
             placement_epoch: self.placement_map.epoch,
-        }
+        })
     }
 
     pub fn replay_metadata_outbox_after(
@@ -251,34 +338,43 @@ impl VannakService {
         replay_metadata_outbox_segment_after(path, checkpoint_offset)
     }
 
-    pub fn hot_index(&self) -> &HotIndex {
+    pub fn hot_index(&self) -> &crate::process_index::ProcessIndex {
         &self.hot_index
     }
 
     pub fn process_instance(
         &self,
         query: &ProcessInstanceQuery,
-    ) -> Option<crate::process::ProcessInstanceSnapshot> {
+    ) -> Result<Option<crate::process::ProcessInstanceSnapshot>, VannakServiceError> {
         self.hot_index.process_instance(query)
     }
 
-    pub fn pipeline_instances(&self, query: &PipelineQuery) -> QueryResult {
+    pub fn pipeline_instances(
+        &self,
+        query: &PipelineQuery,
+    ) -> Result<QueryResult, VannakServiceError> {
         self.hot_index.pipeline_instances(query)
     }
 
-    pub fn events(&self, query: &EventQuery) -> QueryResult {
+    pub fn events(&self, query: &EventQuery) -> Result<QueryResult, VannakServiceError> {
         self.hot_index.events(query)
     }
 
-    pub fn impact(&self, query: &ImpactQuery) -> QueryResult {
+    pub fn impact(&self, query: &ImpactQuery) -> Result<QueryResult, VannakServiceError> {
         self.hot_index.impact(query)
     }
 
-    pub fn process_instances_by_status(&self, query: &ProcessStatusQuery) -> QueryResult {
+    pub fn process_instances_by_status(
+        &self,
+        query: &ProcessStatusQuery,
+    ) -> Result<QueryResult, VannakServiceError> {
         self.hot_index.process_instances_by_status(query)
     }
 
-    pub fn events_in_time_range(&self, query: &TimeRangeQuery) -> QueryResult {
+    pub fn events_in_time_range(
+        &self,
+        query: &TimeRangeQuery,
+    ) -> Result<QueryResult, VannakServiceError> {
         self.hot_index.events_in_time_range(query)
     }
 
@@ -356,10 +452,14 @@ pub enum VannakServiceError {
         target: IptoInstanceId,
         holder: NodeId,
     },
+    ControlPlane(String),
+    ProcessIndexAlreadyPopulated,
     ProcessEventJournalNotConfigured,
     ProcessEventJournal(ProcessEventJournalError),
     MetadataOutboxStorage(MetadataOutboxStorageError),
     ProcessIngest(IngestError),
+    #[cfg(feature = "sitas-runtime")]
+    Runtime(crate::sitas_runtime::SitasRuntimeError),
 }
 
 impl fmt::Display for VannakServiceError {
@@ -374,12 +474,18 @@ impl fmt::Display for VannakServiceError {
                 holder.as_str(),
                 target.as_str()
             ),
+            Self::ProcessIndexAlreadyPopulated => {
+                f.write_str("attach Sitas before replay or ingest")
+            }
+            Self::ControlPlane(error) => write!(f, "control plane unavailable: {error}"),
             Self::ProcessEventJournalNotConfigured => {
                 f.write_str("process event journal is not configured")
             }
             Self::ProcessEventJournal(error) => write!(f, "{error}"),
             Self::MetadataOutboxStorage(error) => write!(f, "{error}"),
             Self::ProcessIngest(error) => write!(f, "{error}"),
+            #[cfg(feature = "sitas-runtime")]
+            Self::Runtime(error) => write!(f, "{error}"),
         }
     }
 }
@@ -410,6 +516,13 @@ impl From<ProcessEventJournalError> for VannakServiceError {
 impl From<IngestError> for VannakServiceError {
     fn from(value: IngestError) -> Self {
         Self::ProcessIngest(value)
+    }
+}
+
+#[cfg(feature = "sitas-runtime")]
+impl From<crate::sitas_runtime::SitasRuntimeError> for VannakServiceError {
+    fn from(error: crate::sitas_runtime::SitasRuntimeError) -> Self {
+        Self::Runtime(error)
     }
 }
 
@@ -455,8 +568,18 @@ mod tests {
             capture.result,
             DurableOutboxEnqueueResult::Enqueued { .. }
         ));
-        assert_eq!(service.snapshot().metadata_outbox.outbox.pending, 1);
-        assert_eq!(service.snapshot().provenance_index.metadata_event_count, 1);
+        assert_eq!(
+            service.snapshot().unwrap().metadata_outbox.outbox.pending,
+            1
+        );
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .provenance_index
+                .metadata_event_count,
+            1
+        );
 
         let mut control = ClusterControlState::new();
         control
@@ -483,7 +606,15 @@ mod tests {
 
         assert_eq!(summary.acknowledged, 1);
         assert_eq!(writer.writes.len(), 1);
-        assert_eq!(service.snapshot().metadata_outbox.outbox.acknowledged, 1);
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .metadata_outbox
+                .outbox
+                .acknowledged,
+            1
+        );
 
         let checkpoint = service
             .acknowledged_checkpoint(
@@ -595,15 +726,29 @@ mod tests {
         assert_eq!(recovery.summary.skipped_records, 1);
         assert_eq!(recovery.summary.replayed_records, 1);
         let mut service = recovery.service;
-        assert_eq!(service.snapshot().metadata_outbox.outbox.pending, 1);
+        assert_eq!(
+            service.snapshot().unwrap().metadata_outbox.outbox.pending,
+            1
+        );
 
         let third = metadata_event("data-3", "meta-3").with_passive_metadata(
             PassiveMetadata::new()
                 .insert("vannak:dataIndividualId", MetadataValue::string("data-3")),
         );
         service.capture_metadata_event(&third).unwrap();
-        assert_eq!(service.snapshot().metadata_outbox.segment.record_count, 3);
-        assert_eq!(service.snapshot().metadata_outbox.outbox.pending, 2);
+        assert_eq!(
+            service
+                .snapshot()
+                .unwrap()
+                .metadata_outbox
+                .segment
+                .record_count,
+            3
+        );
+        assert_eq!(
+            service.snapshot().unwrap().metadata_outbox.outbox.pending,
+            2
+        );
 
         fs::remove_file(path).unwrap();
     }
@@ -645,7 +790,10 @@ mod tests {
             VannakServiceError::WriterLeaseNotHeld { .. }
         ));
         assert!(writer.writes.is_empty());
-        assert_eq!(service.snapshot().metadata_outbox.outbox.pending, 1);
+        assert_eq!(
+            service.snapshot().unwrap().metadata_outbox.outbox.pending,
+            1
+        );
 
         fs::remove_file(path).unwrap();
     }
@@ -671,7 +819,7 @@ mod tests {
             service.ingest_process_event(event).unwrap(),
             IngestOutcome::Accepted
         );
-        assert_eq!(service.snapshot().hot_index.event_count, 1);
+        assert_eq!(service.snapshot().unwrap().hot_index.event_count, 1);
 
         fs::remove_file(path).unwrap();
     }
@@ -693,10 +841,11 @@ mod tests {
         let result = service.ingest_process_event_durable(event.clone()).unwrap();
 
         assert_eq!(result.outcome, IngestOutcome::Accepted);
-        assert_eq!(service.snapshot().hot_index.event_count, 1);
+        assert_eq!(service.snapshot().unwrap().hot_index.event_count, 1);
         assert_eq!(
             service
                 .snapshot()
+                .unwrap()
                 .process_event_journal
                 .as_ref()
                 .unwrap()
@@ -713,6 +862,7 @@ mod tests {
         assert_eq!(
             service
                 .snapshot()
+                .unwrap()
                 .process_event_journal
                 .as_ref()
                 .unwrap()
@@ -756,13 +906,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(summary.replayed_records, 2);
-        assert_eq!(service.snapshot().hot_index.event_count, 2);
+        assert_eq!(service.snapshot().unwrap().hot_index.event_count, 2);
         assert!(
             service
                 .hot_index()
                 .process_instance(&crate::query::ProcessInstanceQuery {
                     process_instance_id: ProcessInstanceId::from("instance-a"),
                 })
+                .unwrap()
                 .is_some()
         );
 
@@ -789,7 +940,7 @@ mod tests {
             ))
             .unwrap();
 
-        let QueryResult::ProcessInstances(failed) =
+        let Ok(QueryResult::ProcessInstances(failed)) =
             service.process_instances_by_status(&ProcessStatusQuery {
                 status: ProcessStatus::Failed,
                 limit: crate::query::QueryLimit::new(10),
@@ -799,7 +950,7 @@ mod tests {
         };
         assert_eq!(failed.len(), 1);
 
-        let QueryResult::Events(events) = service.events_in_time_range(&TimeRangeQuery {
+        let Ok(QueryResult::Events(events)) = service.events_in_time_range(&TimeRangeQuery {
             start: Some(EventTimestamp::from("2026-06-30T10:00:00Z")),
             end: Some(EventTimestamp::from("2026-06-30T10:00:00Z")),
             limit: crate::query::QueryLimit::new(10),
@@ -836,6 +987,7 @@ mod tests {
         let mut service = VannakService::new(placement, mapping, outbox);
 
         let payload_a = IptoWritePayload {
+            provenance: None,
             target: target_a.clone(),
             shard_id: DataIndividualShardId(1),
             idempotency_key: crate::data::IdempotencyKey::from("a"),
@@ -848,6 +1000,7 @@ mod tests {
             .collect(),
         };
         let payload_b = IptoWritePayload {
+            provenance: None,
             target: target_b.clone(),
             shard_id: DataIndividualShardId(2),
             idempotency_key: crate::data::IdempotencyKey::from("b"),
@@ -873,7 +1026,10 @@ mod tests {
 
         assert_eq!(summary.acknowledged, 1);
         assert_eq!(writer.writes, vec![target_b]);
-        assert_eq!(service.snapshot().metadata_outbox.outbox.pending, 1);
+        assert_eq!(
+            service.snapshot().unwrap().metadata_outbox.outbox.pending,
+            1
+        );
         assert_eq!(
             service
                 .metadata_outbox()

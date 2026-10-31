@@ -146,8 +146,7 @@ impl IptoPlacementRing {
         }
         let idx = self
             .points
-            .binary_search_by_key(&shard_id.0, |p| p.position)
-            .unwrap_or_else(|i| i);
+            .partition_point(|point| point.position < shard_id.0);
         Some(&self.points[idx % self.points.len()].instance)
     }
 
@@ -288,8 +287,33 @@ impl IptoPlacementMap {
         &self.overrides
     }
 
+    /// Starts of intervals on which resolution is constant. Ring points own
+    /// their inclusive upper endpoint, so ownership changes at point + 1.
+    pub fn interval_starts(&self) -> BTreeSet<u64> {
+        let mut starts = BTreeSet::from([0]);
+        starts.extend(
+            self.ring
+                .points
+                .iter()
+                .filter_map(|point| point.position.checked_add(1)),
+        );
+        for range in &self.overrides {
+            starts.insert(range.start.0);
+            if let Some(after) = range.end.0.checked_add(1) {
+                starts.insert(after);
+            }
+        }
+        starts
+    }
+
     pub fn instances(&self) -> Vec<IptoInstanceId> {
-        self.ring.instances()
+        self.ring
+            .instances()
+            .into_iter()
+            .chain(self.overrides.iter().map(|range| range.target.clone()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -367,7 +391,7 @@ const MAX_PLACEMENT_HISTORY: usize = 5;
 /// Stores the current placement map plus a bounded history of previous maps
 /// for query fallback during reconfiguration. The history window is pruned to
 /// `MAX_PLACEMENT_HISTORY` entries.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ClusterControlState {
     nodes: BTreeSet<NodeId>,
     placement_maps: BTreeMap<PlacementEpoch, IptoPlacementMap>,
@@ -720,6 +744,59 @@ mod tests {
     }
 
     // -- ring tests --
+
+    #[test]
+    fn interval_resolution_is_stable_at_colliding_ring_points() {
+        let ring = IptoPlacementRing {
+            epoch: PlacementEpoch(1),
+            points: vec![
+                RingPoint {
+                    position: 5,
+                    instance: IptoInstanceId::from("a"),
+                },
+                RingPoint {
+                    position: 5,
+                    instance: IptoInstanceId::from("b"),
+                },
+                RingPoint {
+                    position: 10,
+                    instance: IptoInstanceId::from("c"),
+                },
+            ],
+        };
+        assert_eq!(
+            ring.resolve(DataIndividualShardId(4)),
+            ring.resolve(DataIndividualShardId(5))
+        );
+        assert_eq!(
+            ring.resolve(DataIndividualShardId(6)),
+            Some(&IptoInstanceId::from("c"))
+        );
+    }
+
+    #[test]
+    fn instance_enumeration_includes_override_only_targets() {
+        let map = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(IptoInstanceId::from("ring"), 1).unwrap()],
+            vec![
+                IptoPlacementRange::new(
+                    DataIndividualShardId(1),
+                    DataIndividualShardId(2),
+                    IptoInstanceId::from("override"),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            map.instances(),
+            vec![
+                IptoInstanceId::from("override"),
+                IptoInstanceId::from("ring")
+            ]
+        );
+    }
 
     #[test]
     fn ring_assigns_every_shard_to_an_instance() {

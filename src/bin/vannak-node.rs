@@ -142,7 +142,7 @@ fn run_server(
 
     let raft_node = Arc::new(parking_lot::Mutex::new(RaftNode::new(
         me,
-        500,
+        3000,
         log_store,
         state_store,
         Some(sm),

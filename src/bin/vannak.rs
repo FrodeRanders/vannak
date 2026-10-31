@@ -124,10 +124,19 @@ fn run() -> Result<(), String> {
             .outbox_segment_id
             .clone()
             .unwrap_or_else(|| SegmentId::from("default-outbox"));
-        let node_id = config
-            .outbox_node_id
-            .clone()
-            .unwrap_or_else(|| NodeId::from("vannak"));
+        let node_id = config.outbox_node_id.clone().unwrap_or_else(|| {
+            NodeId::new(
+                config
+                    .raft
+                    .as_ref()
+                    .map_or("vannak", |raft| raft.peer_id.as_str()),
+            )
+        });
+        if let Some(raft) = &config.raft
+            && node_id.as_str() != raft.peer_id
+        {
+            return Err("--outbox node id must match --raft peer id".into());
+        }
         (path, seg_id, node_id)
     };
 
@@ -142,6 +151,18 @@ fn run() -> Result<(), String> {
             discovery.invalid.len()
         );
     }
+
+    let (shards, mailbox_capacity) = config
+        .kafka
+        .as_ref()
+        .map_or((1, 1024), |kafka| (kafka.shards, kafka.mailbox_capacity));
+    let mut process_runtime =
+        vannak::SitasShardRuntime::start(vannak::SitasRuntimeConfig::new(shards, mailbox_capacity))
+            .map_err(|error| error.to_string())?;
+    process_runtime
+        .start_mailbox_workers()
+        .map_err(|error| error.to_string())?;
+    let process_runtime = Arc::new(process_runtime);
 
     // -- service --
     let mut svc = if std::path::Path::new(&outbox_path).exists() {
@@ -170,11 +191,22 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?
     };
 
-    // -- optional process event journal --
-    if let Some(ref journal_path) = config.process_journal_path {
-        let journal = if std::path::Path::new(journal_path).exists() {
+    svc = svc
+        .with_sitas_runtime(process_runtime.clone())
+        .map_err(|error| error.to_string())?;
+
+    // A supervisor always journals process events before acknowledging intake.
+    let journal_path = config
+        .process_journal_path
+        .clone()
+        .unwrap_or_else(|| format!("{outbox_path}.process.seg"));
+    if journal_path == outbox_path {
+        return Err("journal and metadata outbox must use different files".into());
+    }
+    {
+        let journal = if std::path::Path::new(&journal_path).exists() {
             let recovery = vannak::ProcessEventJournal::recover(
-                journal_path,
+                &journal_path,
                 SegmentId::from("process-journal"),
                 outbox_node_id.clone(),
             )
@@ -190,7 +222,7 @@ fn run() -> Result<(), String> {
             recovery.journal
         } else {
             vannak::ProcessEventJournal::create(
-                journal_path,
+                &journal_path,
                 SegmentId::from("process-journal"),
                 outbox_node_id.clone(),
             )
@@ -212,52 +244,85 @@ fn run() -> Result<(), String> {
         max_drain_attempts_per_target: 100,
         verbose: false,
     };
-    let daemon = Daemon::new_with_stop_token(
+    let mut daemon = Daemon::new_with_stop_token(
         svc,
         daemon_config.clone(),
         writer_config,
         stop_token.clone(),
     );
 
-    // -- control state (shared between raft and daemon) --
-    let control_state = Arc::new(Mutex::new(ClusterControlState::new()));
+    // In Raft mode, leases and checkpoints come only from committed state.
+    let mut raft_thread = None;
+    let raft_stop = Arc::new(AtomicBool::new(false));
+    let control_plane: Arc<dyn vannak::control::ControlPlane> = if let Some(raft) = &config.raft {
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let args = raft.clone();
+        let stop = stop_token.clone();
+        let server_stop = raft_stop.clone();
+        raft_thread = Some(std::thread::spawn(move || {
+            if let Err(error) = run_raft_on_thread(
+                &args.host,
+                args.port,
+                &args.peer_id,
+                &args.data_dir,
+                &args.peers,
+                server_stop,
+                ready_tx,
+            ) {
+                eprintln!("vannak: raft node failed: {error}");
+                stop.store(true, Ordering::Relaxed);
+            }
+        }));
+        let plane = ready_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|error| format!("Raft startup failed: {error}"))?;
+        let mut nodes = vec![NodeId::from(raft.peer_id.as_str())];
+        nodes.extend(
+            raft.peers
+                .iter()
+                .filter_map(|peer| parse_peer_spec(peer).map(|(id, _)| NodeId::new(id))),
+        );
+        nodes.sort();
+        nodes.dedup();
+        initialize_control_plane(&*plane, &placement, &nodes, &stop_token)?;
+        // Cluster metadata capture is admitted only at its committed writer
+        // owner. Process-event ingest remains independent of consensus.
+        plane
+    } else {
+        let plane: Arc<dyn vannak::control::ControlPlane> =
+            Arc::new(Mutex::new(ClusterControlState::new()));
+        initialize_control_plane(
+            &*plane,
+            &placement,
+            std::slice::from_ref(&outbox_node_id),
+            &stop_token,
+        )?;
+        plane
+    };
 
-    // -- initialize control state with placement map --
-    {
-        let mut state = control_state.lock().unwrap();
-        state
-            .apply(ClusterControlCommand::AddNode(outbox_node_id.clone()))
-            .unwrap();
-        state
-            .apply(ClusterControlCommand::SetIptoPlacementMap(
-                placement.clone(),
-            ))
-            .unwrap();
-        for target in placement.instances() {
-            state
-                .apply(ClusterControlCommand::GrantWriterLease(WriterLease {
-                    target,
-                    holder: outbox_node_id.clone(),
-                    epoch: LeaseEpoch(1),
-                }))
-                .unwrap();
-        }
-    }
+    daemon
+        .service()
+        .lock()
+        .unwrap()
+        .set_control_plane(control_plane, outbox_node_id.clone());
 
-    // -- background writer snapshot handle --
-    let mut writer_snapshot: Arc<Mutex<Option<vannak::BackgroundWriterSnapshot>>> =
-        Arc::new(Mutex::new(None));
-
-    if config.with_ipto {
+    let writer_snapshot = if config.with_ipto {
         #[cfg(feature = "ipto-writer")]
         {
+            if placement.instances().len() != 1 {
+                return Err(
+                    "--with-ipto currently supports one placement target per supervisor".into(),
+                );
+            }
             let backend: Arc<dyn Backend> = Arc::new(PostgresBackend::new());
             let repo = Arc::new(RepoService::new(backend));
-            let mut writer = IptoRepoWriter::new(repo, config.ipto_tenant_id);
+            let mut writer = IptoRepoWriter::new(repo, config.ipto_tenant_id)
+                .with_target(placement.instances()[0].clone());
             match writer.configure_sdl() {
                 Ok(()) => {
-                    writer_snapshot = daemon.start_background_writer(
-                        control_state.clone(),
+                    let plane = daemon.service().lock().unwrap().control_plane().unwrap();
+                    let snapshot = daemon.start_background_writer(
+                        plane,
                         outbox_node_id.clone(),
                         Arc::new(Mutex::new(writer)),
                     );
@@ -265,43 +330,28 @@ fn run() -> Result<(), String> {
                         "vannak: background Ipto writer enabled for tenant {}",
                         config.ipto_tenant_id
                     );
+                    snapshot
                 }
                 Err(error) if config.require_ipto => return Err(error.to_string()),
                 Err(error) => {
                     eprintln!(
                         "vannak: Ipto writer disabled after startup failure: {error}; use --require-ipto to fail instead"
                     );
+                    Arc::new(Mutex::new(None))
                 }
             }
         }
         #[cfg(not(feature = "ipto-writer"))]
-        return Err("--with-ipto requires the ipto-writer feature".to_string());
-    }
-
-    // -- raft node (background thread) --
-    if let Some(ref raft_config) = config.raft {
-        let stop = stop_token.clone();
-        let host = raft_config.host.clone();
-        let port = raft_config.port;
-        let peer_id = raft_config.peer_id.clone();
-        let data_dir = raft_config.data_dir.clone();
-        let peers = raft_config.peers.clone();
-        let log_host = host.clone();
-        let log_peer_id = peer_id.clone();
-        std::thread::spawn(move || {
-            if let Err(e) = run_raft_on_thread(&host, port, &peer_id, &data_dir, &peers, stop) {
-                eprintln!("vannak: raft node error: {e}");
-            }
-        });
-        eprintln!("vannak: raft node {log_peer_id} starting on {log_host}:{port}");
-    }
+        return Err("--with-ipto requires the ipto-writer feature".into());
+    } else {
+        Arc::new(Mutex::new(None))
+    };
 
     // -- kafka consumer (background thread) --
     #[cfg(feature = "kafka-client")]
-    if let Some(ref kafka_config) = config.kafka {
-        let stop = stop_token.clone();
-        spawn_kafka_consumer(kafka_config, stop);
-    }
+    let kafka_thread = config.kafka.as_ref().map(|kafka_config| {
+        spawn_kafka_consumer(kafka_config, daemon.service().clone(), stop_token.clone())
+    });
     #[cfg(not(feature = "kafka-client"))]
     if config.kafka.is_some() {
         eprintln!("vannak: --kafka flag ignored (kafka-client feature not enabled)");
@@ -309,11 +359,72 @@ fn run() -> Result<(), String> {
 
     // -- health server (blocks main thread until stop) --
     eprintln!("vannak: health endpoint on {}", daemon_config.bind_address);
-    daemon
+    let health_result = daemon
         .serve_health(writer_snapshot)
-        .map_err(|e| format!("health server failed: {e}"))?;
+        .map_err(|error| format!("health server failed: {error}"));
 
-    Ok(())
+    stop_token.store(true, Ordering::Relaxed);
+    #[cfg(feature = "kafka-client")]
+    if let Some(thread) = kafka_thread {
+        let _ = thread.join();
+    }
+    daemon.join_background_writers();
+    raft_stop.store(true, Ordering::Relaxed);
+    if let Some(thread) = raft_thread {
+        let _ = thread.join();
+    }
+    drop(daemon);
+    if let Ok(runtime) = Arc::try_unwrap(process_runtime) {
+        runtime.stop().map_err(|error| error.to_string())?;
+    }
+    health_result
+}
+
+fn initialize_control_plane(
+    plane: &dyn vannak::control::ControlPlane,
+    placement: &IptoPlacementMap,
+    nodes: &[NodeId],
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut last_error = String::new();
+    while std::time::Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+        let attempt = (|| {
+            let state = plane.read()?;
+            for node in nodes {
+                if !state.nodes().contains(node) {
+                    plane.propose(ClusterControlCommand::AddNode(node.clone()))?;
+                }
+            }
+            if state.placement_map().is_none() {
+                plane.propose(ClusterControlCommand::SetIptoPlacementMap(
+                    placement.clone(),
+                ))?;
+            }
+            let state = plane.read()?;
+            for target in state.placement_map().unwrap().instances() {
+                if state.writer_lease(&target).is_none() {
+                    let holder = nodes
+                        .iter()
+                        .find(|node| node.as_str() == target.as_str())
+                        .unwrap_or(&nodes[0])
+                        .clone();
+                    plane.propose(ClusterControlCommand::GrantWriterLease(WriterLease {
+                        target,
+                        holder,
+                        epoch: LeaseEpoch(1),
+                    }))?;
+                }
+            }
+            Ok::<_, String>(())
+        })();
+        match attempt {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = error,
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!("control-plane initialization failed: {last_error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +684,7 @@ fn run_raft_on_thread(
     data_dir: &str,
     peers: &[String],
     stop_token: Arc<AtomicBool>,
+    ready: std::sync::mpsc::SyncSender<Arc<dyn vannak::control::ControlPlane>>,
 ) -> Result<(), String> {
     let bind_addr = SocketAddr::from_str(&format!("{host}:{port}")).unwrap();
     let me = Peer::voter(peer_id.to_string(), bind_addr);
@@ -603,7 +715,7 @@ fn run_raft_on_thread(
 
     let raft_node = Arc::new(parking_lot::Mutex::new(RaftNode::new(
         me,
-        500,
+        3000,
         log_store,
         state_store,
         Some(sm),
@@ -633,6 +745,11 @@ fn run_raft_on_thread(
         let listener = tokio::net::TcpListener::bind(bind_addr)
             .await
             .map_err(|e| e.to_string())?;
+        let plane = Arc::new(vannak::node_control::RaftControlPlane::new(
+            tokio::runtime::Handle::current(),
+            handler.clone(),
+        ));
+        ready.send(plane).map_err(|error| error.to_string())?;
 
         loop {
             if stop_token.load(Ordering::Relaxed) {
@@ -672,7 +789,7 @@ fn run_raft_on_thread(
                     });
                 }
                 Ok(Err(_)) => {}
-                Err(_) => break,
+                Err(_) => continue,
             }
         }
         Ok::<_, String>(())
@@ -779,34 +896,19 @@ fn spawn_shutdown_signal_handler(stop_token: Arc<AtomicBool>) {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "kafka-client")]
-fn spawn_kafka_consumer(config: &KafkaArgs, stop_token: Arc<AtomicBool>) {
-    use vannak::{
-        KafkaPayloadFormat, KafkaProcessConsumer, KafkaProcessConsumerConfig, SitasRuntimeConfig,
-        SitasShardRuntime,
-    };
+fn spawn_kafka_consumer(
+    config: &KafkaArgs,
+    service: Arc<Mutex<VannakService>>,
+    stop_token: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use vannak::{KafkaPayloadFormat, KafkaProcessConsumer, KafkaProcessConsumerConfig};
 
     let brokers = config.brokers.clone();
     let group_id = config.group_id.clone();
     let shards = config.shards;
-    let mailbox_capacity = config.mailbox_capacity;
     let topics = config.topics.clone();
 
     std::thread::spawn(move || {
-        let runtime =
-            match SitasShardRuntime::start(SitasRuntimeConfig::new(shards, mailbox_capacity)) {
-                Ok(mut rt) => {
-                    if let Err(e) = rt.start_mailbox_workers() {
-                        eprintln!("vannak: kafka consumer: failed to start workers: {e}");
-                        return;
-                    }
-                    rt
-                }
-                Err(e) => {
-                    eprintln!("vannak: kafka consumer: failed to start Sitas: {e}");
-                    return;
-                }
-            };
-
         let mut consumer = match KafkaProcessConsumer::start(
             KafkaProcessConsumerConfig::new(&brokers, &group_id, topics.iter().map(String::as_str))
                 .with_payload_format(KafkaPayloadFormat::DurgaJson),
@@ -826,7 +928,9 @@ fn spawn_kafka_consumer(config: &KafkaArgs, stop_token: Arc<AtomicBool>) {
 
         let mut accepted = 0u64;
         while !stop_token.load(Ordering::Relaxed) {
-            match consumer.poll_once(&runtime, None) {
+            match consumer
+                .poll_with_sink(|pending| service.lock().unwrap().submit_kafka_record(pending))
+            {
                 Ok(Some(_)) => accepted += 1,
                 Ok(None) => {}
                 Err(e) => eprintln!("vannak: kafka consumer: {e}"),
@@ -842,9 +946,8 @@ fn spawn_kafka_consumer(config: &KafkaArgs, stop_token: Arc<AtomicBool>) {
             }
         }
 
-        let _ = runtime.stop();
         eprintln!("vannak: kafka consumer stopped after {accepted} records");
-    });
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1095,192 @@ Options:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestRaft {
+        plane: Arc<dyn vannak::control::ControlPlane>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+        addr: SocketAddr,
+    }
+
+    impl Drop for TestRaft {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+
+    fn test_raft(
+        id: &str,
+        addr: SocketAddr,
+        dir: &std::path::Path,
+        peers: Vec<String>,
+    ) -> TestRaft {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let id = id.to_string();
+        let dir = dir.to_string_lossy().to_string();
+        let thread = std::thread::spawn(move || {
+            run_raft_on_thread(
+                "127.0.0.1",
+                addr.port(),
+                &id,
+                &dir,
+                &peers,
+                thread_stop,
+                sender,
+            )
+            .unwrap();
+        });
+        let plane = receiver.recv_timeout(Duration::from_secs(10)).unwrap();
+        TestRaft {
+            plane,
+            stop,
+            thread: Some(thread),
+            addr,
+        }
+    }
+
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("vannak-{name}-{}-{suffix}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn unused_addr() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
+    #[test]
+    fn raft_supervisor_survives_idle_and_recovers_committed_control() {
+        let dir = test_dir("raft-recovery");
+        let addr = unused_addr();
+        let placement = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 16).unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let node = test_raft("node-a", addr, &dir, vec![]);
+        initialize_control_plane(
+            &*node.plane,
+            &placement,
+            &[NodeId::from("node-a")],
+            &node.stop,
+        )
+        .unwrap();
+        // No TCP client connects during this interval. The accept timeout must
+        // keep polling rather than tear down the Raft runtime.
+        std::thread::sleep(Duration::from_millis(1200));
+        std::net::TcpStream::connect(node.addr).unwrap();
+        let checkpoint = vannak::MetadataOutboxCheckpoint {
+            data_individual_shard_id: vannak::DataIndividualShardId(42),
+            target: IptoInstanceId::from("ipto-a"),
+            segment_id: SegmentId::from("outbox"),
+            last_acknowledged_offset: vannak::RecordOffset(88),
+            mapping_version: "v1".into(),
+            epoch: vannak::CheckpointEpoch(1),
+        };
+        node.plane
+            .propose(ClusterControlCommand::RecordOutboxCheckpoint(
+                checkpoint.clone(),
+            ))
+            .unwrap();
+        assert_eq!(
+            node.plane
+                .read()
+                .unwrap()
+                .outbox_checkpoint(checkpoint.data_individual_shard_id, &checkpoint.target),
+            Some(&checkpoint)
+        );
+        drop(node);
+        let restarted = test_raft("node-a", addr, &dir, vec![]);
+        initialize_control_plane(
+            &*restarted.plane,
+            &placement,
+            &[NodeId::from("node-a")],
+            &restarted.stop,
+        )
+        .unwrap();
+        assert_eq!(
+            restarted
+                .plane
+                .read()
+                .unwrap()
+                .outbox_checkpoint(checkpoint.data_individual_shard_id, &checkpoint.target),
+            Some(&checkpoint)
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn raft_control_forwards_to_leader_and_fails_closed_without_quorum() {
+        let dir = test_dir("raft-quorum");
+        let addresses = [unused_addr(), unused_addr(), unused_addr()];
+        let mut nodes = Vec::new();
+        for (index, &addr) in addresses.iter().enumerate() {
+            let peers = addresses
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(other, addr)| format!("node-{other}@{addr}"))
+                .collect();
+            nodes.push(test_raft(
+                &format!("node-{index}"),
+                addr,
+                &dir.join(index.to_string()),
+                peers,
+            ));
+        }
+        let placement = IptoPlacementMap::new(
+            PlacementEpoch(1),
+            vec![IptoPlacementSlot::new(IptoInstanceId::from("ipto-a"), 4).unwrap()],
+            vec![],
+        )
+        .unwrap();
+        let identities: Vec<_> = (0..3)
+            .map(|index| NodeId::new(format!("node-{index}")))
+            .collect();
+        initialize_control_plane(&*nodes[0].plane, &placement, &identities, &nodes[0].stop)
+            .unwrap();
+        for node in &nodes {
+            let state = node.plane.read().unwrap();
+            assert_eq!(state.placement_map(), Some(&placement));
+            assert_eq!(
+                state
+                    .writer_lease(&IptoInstanceId::from("ipto-a"))
+                    .unwrap()
+                    .holder,
+                identities[0]
+            );
+        }
+        drop(nodes.pop());
+        drop(nodes.pop());
+        assert!(
+            nodes[0].plane.read().is_err(),
+            "a minority must not authorize writer leases"
+        );
+        assert!(
+            nodes[0]
+                .plane
+                .propose(ClusterControlCommand::AddNode(NodeId::from("uncommitted")))
+                .is_err()
+        );
+        drop(nodes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

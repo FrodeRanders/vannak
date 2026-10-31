@@ -404,6 +404,13 @@ then fall back through previous epochs, and finally broadcast to all known
 Ipto instances if needed. No data movement is required — the query layer
 absorbs the placement change.
 
+Placement changes are computed exactly from the union of old/new interval
+boundaries: zero, ring points plus one, override starts, and override ends plus
+one. Inclusive endpoints, ring wraparound, and `u64::MAX` are preserved. Adjacent
+ranges merge only when both source and destination match. Work scales with ring
+configuration size, not the number of possible shard IDs. Instance enumeration
+includes override-only targets as well as ring members.
+
 ### Sitas runtime sharding
 
 The first routing strategy should be simple and explicit.
@@ -604,20 +611,40 @@ outbox boundaries:
   ingest, durable metadata capture, lease-gated target drains, checkpoint
   lookup, recovery replay, and owned service snapshots.
 
-This is intentionally only the local persistence, replay, append recovery, and
-checkpoint-data boundary. The `daemon` feature attaches segment discovery and a
-lease-gated background writer loop at the supervisor boundary; the `vannak`
-binary reopens existing outbox and process-journal segments when configured
-paths already exist, shares a stop token across daemon/Raft/Kafka/writer loops,
-and handles Ctrl-C/SIGTERM for orderly shutdown. Startup validates positive
-operator limits, complete Ipto placement pairs, health-listener binding, and
-default outbox directory creation before serving traffic. The background writer
-publishes live owned snapshots into the daemon health state every cycle and
-records acknowledged outbox checkpoints into the local control state after
-successful target drains. Richer retry policy and replicated checkpoint
-publication remain separate control-plane concerns so they can be attached to
-Raft-controlled ownership without changing code that produces process events or
-metadata write payloads.
+The `vannak` supervisor uses one shared `SitasShardRuntime` for HTTP process
+ingest, Kafka mailbox admission, typed process queries, and health snapshots.
+`ProcessIndex` selects the dependency-free local implementation for library
+users or the explicit Sitas handle for the supervisor; process state stays in
+`ShardLocal<HotIndex>`. Service process queries and snapshots return `Result`
+so executor errors cannot masquerade as empty query results. Attach the Sitas
+runtime before replay or ingest; replacing a populated local index is rejected.
+The `node` feature includes `sitas-runtime`.
+
+The supervisor always opens a process journal: `--journal` selects its path,
+otherwise it uses `<outbox-path>.process.seg`. Both HTTP and Kafka append and
+sync before admission. Kafka retains pending records, including their journal
+offsets, through admission and commit failures. Its offsets commit only after
+the record reaches the shared Sitas mailbox. Recovery replays the journal into
+the same shard-owned indexes before intake starts. The library still offers an
+explicit memory-only ingest method for callers that choose that policy.
+
+Metadata capture is exposed as `POST /ingest/metadata`. It validates identity,
+resolves domain placement, persists the original event and mapped Ipto payload,
+and syncs the outbox before returning success. The original event is an optional
+`VMD1` extension following the existing payload attributes; it contains identity,
+process context, operation details, source reference, and both metadata maps.
+New readers accept older payload-only records. Older binaries cannot read the
+extension. Recovery reconstructs provenance from all original events, including
+records before a delivery checkpoint. Legacy payload-only segments can still
+be delivered but cannot reconstruct original provenance facts.
+
+Transient Ipto failures are requeued once per writer cycle; permanent failures
+stay parked until explicitly retried. Checkpoints advance only through the
+acknowledged prefix of each `(shard, target)` stream, so a later success cannot
+skip an earlier failed write. Failed checkpoint proposals are retried on later
+cycles even if there are no new deliveries. `/health` includes
+`background_writer.last_control_error` when the control view or publication
+fails. Shutdown interrupts writer waits and joins writer and Kafka threads.
 
 ## 9. Raft-Controlled State
 
@@ -648,6 +675,42 @@ Raft should not initially own:
 
 This boundary is important. If it blurs, Vannak becomes a slow replicated event
 log instead of a fast operational index with agreed control state.
+
+### Supervisor Control Access
+
+`ControlPlane` separates committed control reads/proposals from raw-event
+intake. Standalone mode uses local control state. With `--raft`,
+`RaftControlPlane` sends `ControlSnapshot` queries through the Graft leader's
+linearizable read barrier and submits compact commands through its committed
+command path. Followers forward through the request/response RPC transport.
+No local fallback leases are granted when Raft is unavailable. Metadata capture
+and writer cycles stop admitting affected work if this control read fails;
+process ingest remains independent of consensus.
+
+Startup bootstraps missing node identities, placement, and writer leases through
+Raft, then uses existing committed configuration on restart. Initial target
+holders are chosen deterministically: a node named for the target, or the first
+sorted configured node. The outbox node identity must match the Raft peer id.
+Cluster metadata intake is accepted only at the committed writer holder for its
+target, because cross-node transfer of durable outboxes is not implemented.
+There is no automatic lease reassignment after node failure; ownership transfer
+must quiesce the former holder and arrange durable data access first. Epochs do
+not fence already-running external database calls.
+
+The background writer proposes acknowledged checkpoints through the same Raft
+control plane. Supervisor restart conservatively replays the complete local
+outbox and relies on idempotent Ipto delivery; it does not apply a per-shard
+watermark as a global offset over a mixed-shard segment. The scoped replay
+helpers remain available for callers managing a single recovery stream.
+
+The accept timeout only polls for shutdown; an idle listener stays active.
+The election timeout is 3000 ms, above Graft's 750 ms heartbeat interval.
+`--with-ipto` currently supports a single placement target per supervisor. The
+concrete writer is bound to that target and rejects payloads addressed elsewhere.
+A registry of independently configured repository connections is required before
+multi-target writer delivery is enabled. Idempotency checks use tenant-scoped
+correlation-ID searches. Ipto 0.1.0's correlation-ID fetch recursively locks its
+PostgreSQL client when a unit exists, so that fetch cannot be used for replay.
 
 ### Raft Boundary
 
@@ -1054,7 +1117,7 @@ These policies should be typed configuration, not scattered conditionals.
 - Replicate checkpoint manifests.
 - Add Raft state machine adapter. [done: `ClusterStateMachine` implements
   `graft_core::StateMachine` and `QueryableStateMachine` behind `raft` feature,
-  with JSON command encoding, snapshot/restore, and 5 query types]
+  with JSON command encoding, snapshot/restore, and 8 query types]
 - Add recovery flow from committed manifests.
 
 ### Phase 7: Cluster Operation

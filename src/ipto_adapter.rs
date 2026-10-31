@@ -122,6 +122,7 @@ pub struct IptoRepoWriter {
     tenant_id: i64,
     attr_ids: HashMap<IptoAttributeName, (i64, String)>,
     sdl_configured: bool,
+    target: Option<crate::ipto::IptoInstanceId>,
 }
 
 impl IptoRepoWriter {
@@ -135,7 +136,14 @@ impl IptoRepoWriter {
             tenant_id,
             attr_ids: HashMap::new(),
             sdl_configured: false,
+            target: None,
         }
+    }
+
+    /// Bind this repository connection to one explicit placement target.
+    pub fn with_target(mut self, target: crate::ipto::IptoInstanceId) -> Self {
+        self.target = Some(target);
+        self
     }
 
     /// Configure PROV-O attribute metadata from the built-in SDL schema.
@@ -225,6 +233,26 @@ impl IptoRepoWriter {
         )
     }
 
+    fn correlation_exists(&self, corrid: &str) -> Result<bool, IptoWriteError> {
+        // Ipto 0.1.0's get_unit_by_corrid_json holds its PostgreSQL client
+        // mutex while recursively loading a found unit. Search checks existence
+        // without that recursive lock and scopes idempotency to this tenant.
+        self.repo
+            .search_units(
+                serde_json::json!({"tenantid": self.tenant_id, "corrid": corrid}),
+                ipto_rust::model::SearchOrder {
+                    field: "created".into(),
+                    descending: false,
+                },
+                ipto_rust::model::SearchPaging {
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+            .map(|result| result.total_hits > 0)
+            .map_err(|error| IptoWriteError::retryable(format!("corrid search failed: {error}")))
+    }
+
     fn metadata_value_to_json(&self, value: &MetadataValue) -> Value {
         match value {
             MetadataValue::String(s) => Value::Array(vec![Value::String(s.clone())]),
@@ -276,6 +304,15 @@ impl IptoRepoWriter {
 
 impl IptoWriter for IptoRepoWriter {
     fn write(&mut self, payload: &IptoWritePayload) -> Result<(), IptoWriteError> {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target != &payload.target)
+        {
+            return Err(IptoWriteError::permanent(
+                "payload target differs from the writer repository target",
+            ));
+        }
         if !self.sdl_configured {
             return Err(IptoWriteError::permanent(
                 "IptoRepoWriter: SDL not configured — call configure_sdl() first",
@@ -284,18 +321,11 @@ impl IptoWriter for IptoRepoWriter {
 
         let corrid = self.corrid_for_key(&payload.idempotency_key);
 
-        match self
-            .repo
-            .get_unit_by_corrid_json(&corrid)
-            .map_err(|e| IptoWriteError::retryable(format!("corrid lookup failed: {e}")))?
-        {
-            Some(_existing) => {}
-            None => {
-                let unit = self.build_unit_payload(payload)?;
-                self.repo
-                    .store_unit_json(unit)
-                    .map_err(|e| IptoWriteError::retryable(format!("store unit failed: {e}")))?;
-            }
+        if !self.correlation_exists(&corrid)? {
+            let unit = self.build_unit_payload(payload)?;
+            self.repo.store_unit_json(unit).map_err(|error| {
+                IptoWriteError::retryable(format!("store unit failed: {error}"))
+            })?;
         }
 
         self.write_relation_units(payload)?;
@@ -341,12 +371,7 @@ impl IptoRepoWriter {
             );
             let corrid = self.corrid_for_key(&IdempotencyKey::from(&*relation_corrid_key));
 
-            if self
-                .repo
-                .get_unit_by_corrid_json(&corrid)
-                .map_err(|e| IptoWriteError::retryable(format!("corrid lookup failed: {e}")))?
-                .is_some()
-            {
+            if self.correlation_exists(&corrid)? {
                 continue;
             }
 
@@ -428,6 +453,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bound_writer_rejects_payload_for_another_repository_before_io() {
+        let backend: Arc<dyn ipto_rust::backend::Backend> =
+            Arc::new(ipto_rust::backends::postgres::PostgresBackend::new());
+        let mut writer = IptoRepoWriter::new(Arc::new(RepoService::new(backend)), 1)
+            .with_target(crate::ipto::IptoInstanceId::from("ipto-a"));
+        let payload = IptoWritePayload {
+            target: crate::ipto::IptoInstanceId::from("ipto-b"),
+            shard_id: crate::data::DataIndividualShardId(0),
+            idempotency_key: IdempotencyKey::from("key"),
+            mapping_version: "v1".into(),
+            attributes: Default::default(),
+            provenance: None,
+        };
+        let error = writer.write(&payload).unwrap_err();
+        assert!(!error.is_retryable());
+        assert!(error.message().contains("target"));
+    }
+
+    #[test]
     fn corrid_is_deterministic() {
         let backend = Arc::new(ipto_rust::backends::postgres::PostgresBackend::new());
         let writer = IptoRepoWriter::new(Arc::new(RepoService::new(backend)), 1);
@@ -461,6 +505,7 @@ mod tests {
             .insert(IptoAttributeName::from("rdfs:label"), (10, "1".into()));
 
         let payload = IptoWritePayload {
+            provenance: None,
             target: crate::ipto::IptoInstanceId::from("ignored"),
             shard_id: crate::data::DataIndividualShardId(0),
             idempotency_key: IdempotencyKey::from("test"),

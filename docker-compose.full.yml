@@ -99,6 +99,7 @@ services:
       --health 0.0.0.0:9090
       --outbox /data/outbox.seg outbox vannak-1
       --placement 1 vannak-1 64 vannak-2 64 vannak-3 64
+      --kafka redpanda:9092 vannak-full-ingest 2 1024 process-events-demo-pipeline process-events-test-pipeline
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://127.0.0.1:9090/health"]
       interval: 5s

@@ -27,7 +27,7 @@ segment id, which seeds checkpoint-aware replay.
 
 \subsection{Recovery Flow}
 
-On restart a node reconstructs its operational state in order:
+The target recovery sequence for checkpoint-driven ownership transfer is:
 
 \begin{enumerate}
 \item Load the \raft{} log and persistent state from disk.
@@ -39,6 +39,15 @@ On restart a node reconstructs its operational state in order:
   outbox state.
 \item Resume delivery of pending entries through the \texttt{IptoWriter}.
 \end{enumerate}
+
+The current supervisor conservatively replays its complete local outbox and
+relies on idempotent Ipto writes. It does not apply a single shard's checkpoint
+as a global offset over a mixed-shard segment. The process journal rebuilds the
+shared Sitas indexes before intake starts. New outbox records also preserve
+original provenance events, and replay rebuilds the provenance index even for
+records preceding a delivery checkpoint. Legacy payload-only records remain
+deliverable but cannot reconstruct the original metadata event. New readers
+accept both formats; older binaries cannot read the new provenance extension.
 
 \subsection{Outbox Recovery}
 

@@ -9,8 +9,11 @@ over that state, and how data-individual metadata events are captured.
 
 Process events enter as \texttt{PipelineEvent} values and are submitted to a
 shard-local \texttt{HotIndex} through \texttt{HotIndex::ingest}. The index is
-intentionally single-threaded; the expected \sitas{} integration holds one
-\texttt{HotIndex} per owning shard.
+intentionally single-threaded. The supervisor holds one \texttt{HotIndex} per
+owning \sitas{} shard, and HTTP ingest, Kafka admission, queries, and health
+snapshots all use that same runtime. Process intake is journaled before
+admission; the default journal path is the outbox path followed by
+\texttt{.process.seg}.
 
 \subsection{Validation}
 
@@ -198,3 +201,19 @@ safe to expose across shard boundaries.
 \end{vnote}
 
 \endinput
+
+\subsection{Metadata HTTP Capture}
+
+\texttt{POST /ingest/metadata} accepts JSON with metadata-event and
+individual identities, tenant, environment, pipeline, process instance,
+timestamp, operation, and passive/active metadata objects. An omitted
+\texttt{data\_individual\_shard\_id} is derived from the data-individual identity.
+The server syncs the outbox before returning success. New records preserve the
+complete original fact independently of the mapped attributes, and recovery
+rebuilds local provenance queries from those facts.
+
+\texttt{POST /query} accepts \texttt{DataIndividualMetadata},
+\texttt{ProcessMetadata}, and \texttt{ActivityMetadata} queries with the relevant
+identity fields and an optional limit. In Raft mode metadata capture must reach
+the committed writer holder for the target; a failed quorum read prevents
+admission. Process intake remains independent of consensus.

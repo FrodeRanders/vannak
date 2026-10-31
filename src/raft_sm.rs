@@ -444,7 +444,7 @@ fn encode_snapshot(state: &ClusterControlState) -> Result<Vec<u8>, serde_json::E
     serde_json::to_vec(&snapshot)
 }
 
-fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
+pub fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
     let snapshot: SerClusterControlSnapshot =
         serde_json::from_slice(data).map_err(|e| e.to_string())?;
 
@@ -544,6 +544,8 @@ fn decode_snapshot(data: &[u8]) -> Result<ClusterControlState, String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "query", content = "data")]
 pub enum ClusterQuery {
+    /// Full committed control view for the supervised service.
+    ControlSnapshot,
     /// Resolve a shard ID to an Ipto instance (current epoch only).
     ResolveTarget { shard_id: u64 },
     /// Resolve with fallback through placement history.
@@ -562,6 +564,7 @@ pub enum ClusterQuery {
 
 fn handle_query(state: &ClusterControlState, query: &ClusterQuery) -> Vec<u8> {
     match query {
+        ClusterQuery::ControlSnapshot => encode_snapshot(state).unwrap_or_default(),
         ClusterQuery::ResolveTarget { shard_id } => {
             let result = state
                 .resolve_ipto_target(DataIndividualShardId(*shard_id))
